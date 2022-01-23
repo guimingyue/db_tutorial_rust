@@ -1,6 +1,7 @@
 use std::io;
+use std::io::Write;
 use std::process;
-use crate::PrepareResult::{PREPARE_SUCCESS, PREPARE_UNRECOGNIZED_STATEMENT};
+use crate::PrepareResult::{PREPARE_SUCCESS, PREPARE_SYNTAX_ERROR, PREPARE_UNRECOGNIZED_STATEMENT};
 
 #[derive(PartialEq)]
 pub enum MetaCommandResult {
@@ -11,7 +12,8 @@ pub enum MetaCommandResult {
 #[derive(PartialEq)]
 pub enum PrepareResult {
     PREPARE_SUCCESS,
-    PREPARE_UNRECOGNIZED_STATEMENT
+    PREPARE_UNRECOGNIZED_STATEMENT,
+    PREPARE_SYNTAX_ERROR
 }
 
 #[derive(PartialEq)]
@@ -21,9 +23,24 @@ pub enum StatementType {
     STATEMENT_UNSUPPORTED
 }
 
-pub struct Statement {
-    stmt_type: StatementType
+pub struct Row {
+    id: u32,
+    username: String,
+    email: String
 }
+
+pub struct Statement {
+    stmt_type: StatementType,
+    row_to_insert: Option<Row>
+}
+
+const ID_SIZE: usize = std::mem::size_of::<u32>();
+const USERNAME_SIZE: usize = 32;
+const EMAIL_SIZE: usize = 255;
+const ID_OFFSET: usize = 0;
+const USERNAME_OFFSET: usize = 0;
+const EMAIL_OFFSET: usize = 0;
+const ROW_SIZE: usize = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
 
 fn main() {
     fn print_prompt() {
@@ -48,27 +65,65 @@ fn main() {
         MetaCommandResult::META_COMMAND_UNRECOGNIZED_COMMAND
     }
 
-    fn prepare_statement(command: &str) -> (Box<Statement>, PrepareResult) {
-        let stmt_type= if command.starts_with("insert") {
-            StatementType::STATEMENT_INSERT
-        } else if command.starts_with("select") {
-            StatementType::STATEMENT_SELECT
-        } else {
-            StatementType::STATEMENT_UNSUPPORTED
-        };
+    fn serialize_row(row: &Row) -> Box<Vec<u8>> {
+        let mut buf = vec![];
+        buf.write(row.id.to_ne_bytes().as_slice());
+        write_attribute(&mut buf, row.username.as_str(), USERNAME_SIZE);
+        write_attribute(&mut buf, row.email.as_str(), EMAIL_SIZE);
+        Box::new(buf)
+    }
 
-        let stmt = Statement {
-            stmt_type
+    fn write_attribute(writer: &mut dyn Write, attr: &str, len: usize) {
+        let attr_bytes = attr.as_bytes();
+        writer.write(attr_bytes);
+        writer.write(vec![0; len - attr_bytes.len()].as_slice());
+    }
+
+    fn deserialize_row(buf: &Vec<u8>) -> Box<Row>{
+        let id_bytes = &buf[0..ID_SIZE];
+        // TODO
+        Box::new(Row {
+            id: 1,
+            username: "".to_string(),
+            email: "".to_string()
+        })
+    }
+
+    fn prepare_statement(command: &str) -> (Box<Option<Statement>>, PrepareResult) {
+        let mut stmt = if command.starts_with("insert") {
+            let splits: Vec<&str> = command.split(" ").collect();
+            if splits.len() < 4 {
+               return (Box::new(None), PREPARE_SYNTAX_ERROR)
+            }
+            Statement {
+                stmt_type: StatementType::STATEMENT_INSERT,
+                row_to_insert: Some(Row {
+                    id: splits[1].trim().parse().unwrap(),
+                    username: String::from(splits[2].trim()),
+                    email: String::from(splits[3].trim())
+                })
+            }
+        } else if command.starts_with("select") {
+            Statement {
+                stmt_type: StatementType::STATEMENT_SELECT,
+                row_to_insert: None
+            }
+        } else {
+            Statement {
+                stmt_type: StatementType::STATEMENT_UNSUPPORTED,
+                row_to_insert: None
+            }
         };
 
         if stmt.stmt_type == StatementType::STATEMENT_UNSUPPORTED {
-            (Box::new(stmt), PREPARE_UNRECOGNIZED_STATEMENT)
+            (Box::new(Some(stmt)), PREPARE_UNRECOGNIZED_STATEMENT)
         } else {
-            (Box::new(stmt), PREPARE_SUCCESS)
+            (Box::new(Some(stmt)), PREPARE_SUCCESS)
         }
     }
 
-    fn execute_statement(stmt: &Statement) {
+    fn execute_statement(statement: Box<Option<Statement>>) {
+        let stmt = statement.unwrap();
         match &stmt.stmt_type {
             StatementType::STATEMENT_INSERT => {
                 println!("This is where we would do an insert")
@@ -99,7 +154,7 @@ fn main() {
             println!("Unrecognized keyword at start of {}.", command);
             continue;
         }
-        execute_statement(&stmt);
+        execute_statement(stmt);
         println!("Executed.");
     }
 }
