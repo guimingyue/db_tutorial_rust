@@ -1,5 +1,5 @@
 use std::io;
-use std::io::Write;
+use std::io::{Cursor, Read, Write};
 use std::process;
 use crate::PrepareResult::{PREPARE_SUCCESS, PREPARE_SYNTAX_ERROR, PREPARE_UNRECOGNIZED_STATEMENT};
 
@@ -34,6 +34,11 @@ pub struct Statement {
     row_to_insert: Option<Row>
 }
 
+pub struct Table {
+    u32: num_rows,
+    pages: Vec<Row>
+}
+
 const ID_SIZE: usize = std::mem::size_of::<u32>();
 const USERNAME_SIZE: usize = 32;
 const EMAIL_SIZE: usize = 255;
@@ -41,6 +46,10 @@ const ID_OFFSET: usize = 0;
 const USERNAME_OFFSET: usize = 0;
 const EMAIL_OFFSET: usize = 0;
 const ROW_SIZE: usize = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
+const PAGE_SIZE: usize = 4096;
+const TABLE_MAX_PAGES: usize = 100;
+const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
+const TABLE_MAX_ROWS: usize = TABLE_MAX_PAGES * ROWS_PER_PAGE;
 
 fn main() {
     fn print_prompt() {
@@ -80,12 +89,17 @@ fn main() {
     }
 
     fn deserialize_row(buf: &Vec<u8>) -> Box<Row>{
-        let id_bytes = &buf[0..ID_SIZE];
-        // TODO
+        let mut reader = Cursor::new(buf);
+        let mut id_bytes = [0; ID_SIZE];
+        reader.read_exact(&mut id_bytes);
+        let mut username_bytes = [0; USERNAME_SIZE];
+        reader.read_exact(&mut username_bytes);
+        let mut email_bytes = [0; EMAIL_SIZE];
+        reader.read_exact(&mut email_bytes);
         Box::new(Row {
-            id: 1,
-            username: "".to_string(),
-            email: "".to_string()
+            id: u32::from_ne_bytes(id_bytes),
+            username: String::from_utf8(Vec::from(username_bytes)).unwrap(),
+            email: String::from_utf8(Vec::from(email_bytes)).unwrap()
         })
     }
 
