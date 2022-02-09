@@ -1,6 +1,7 @@
 use std::io;
 use std::io::{Cursor, Read, Write};
 use std::process;
+use crate::ExecuteResult::{EXECUTE_FAIL, EXECUTE_SUCCESS, EXECUTE_TABLE_FULL};
 use crate::PrepareResult::{PREPARE_SUCCESS, PREPARE_SYNTAX_ERROR, PREPARE_UNRECOGNIZED_STATEMENT};
 
 #[derive(PartialEq)]
@@ -17,16 +18,17 @@ pub enum PrepareResult {
 }
 
 #[derive(PartialEq)]
+pub enum ExecuteResult {
+    EXECUTE_SUCCESS,
+    EXECUTE_FAIL,
+    EXECUTE_TABLE_FULL
+}
+
+#[derive(PartialEq)]
 pub enum StatementType {
     STATEMENT_INSERT,
     STATEMENT_SELECT,
     STATEMENT_UNSUPPORTED
-}
-
-pub struct Row {
-    id: u32,
-    username: String,
-    email: String
 }
 
 pub struct Statement {
@@ -34,9 +36,64 @@ pub struct Statement {
     row_to_insert: Option<Row>
 }
 
+#[derive(Clone)]
+pub struct Row {
+    id: u32,
+    username: String,
+    email: String
+}
+
+impl Row {
+
+    fn new() -> Self {
+        Row {
+            id: 0,
+            username: String::new(),
+            email: String::new()
+        }
+    }
+}
+
+struct Page {
+    rows: Vec<Row>
+}
+
+impl Page {
+
+    unsafe fn row_slot(&self, index: usize) -> *const Row {
+        self.rows.().offset(index as isize)
+    }
+
+    unsafe fn row_mut_slot(&mut self, index: usize) -> *mut Row {
+        self.rows.as_mut_ptr().offset(index as isize)
+    }
+}
+
 pub struct Table {
-    u32: num_rows,
-    pages: Vec<Row>
+    num_rows: usize,
+    pages: Vec<Page>
+}
+
+impl Table {
+
+    fn new() -> Self {
+        Table {
+            num_rows: 0,
+            pages: Vec::with_capacity(TABLE_MAX_PAGES)
+        }
+    }
+
+    unsafe fn page_slot(&mut self, index: usize) -> *const Page {
+        self.pages.as_ptr().offset(index as isize)
+    }
+
+    unsafe fn page_mut_slot(&mut self, index: usize) -> *mut Page {
+        self.pages.as_mut_ptr().offset(index as isize)
+    }
+
+    fn free(&mut self) {
+        // TODO
+    }
 }
 
 const ID_SIZE: usize = std::mem::size_of::<u32>();
@@ -80,6 +137,16 @@ fn main() {
         write_attribute(&mut buf, row.username.as_str(), USERNAME_SIZE);
         write_attribute(&mut buf, row.email.as_str(), EMAIL_SIZE);
         Box::new(buf)
+    }
+
+    fn row_slot(table: &mut Table, row_num: usize) -> Option<&Row> {
+        let page_num = row_num / ROWS_PER_PAGE;
+        let row_offset = row_num % ROWS_PER_PAGE;
+        unsafe {
+            let mut page = table.page_mut_slot(page_num);
+            page.row_mut_slot(row_offset);
+            Some()
+        }
     }
 
     fn write_attribute(writer: &mut dyn Write, attr: &str, len: usize) {
@@ -136,19 +203,40 @@ fn main() {
         }
     }
 
-    fn execute_statement(statement: Box<Option<Statement>>) {
-        let stmt = statement.unwrap();
-        match &stmt.stmt_type {
-            StatementType::STATEMENT_INSERT => {
-                println!("This is where we would do an insert")
+    fn execute_insert(statement: &Statement, table: &mut Table) -> ExecuteResult {
+        match statement.row_to_insert.as_ref() {
+            Some(row) => {
+                if table.num_rows > TABLE_MAX_ROWS {
+                    return EXECUTE_TABLE_FULL;
+                }
+                let buf = serialize_row(row);
+                table.num_rows += 1;
+                EXECUTE_SUCCESS
             },
-            StatementType::STATEMENT_SELECT => {
-                println!("This is where we would do an select")
-            },
-            _ => println!("error")
+            None => EXECUTE_FAIL
         }
     }
 
+    fn execute_select(statement: &Statement, table: &Table) -> ExecuteResult {
+        for i in 0..table.num_rows {
+            let page = &table.pages[i];
+            for j in 0..page.len() {
+                deserialize_row(&page[j])
+            }
+        }
+        EXECUTE_SUCCESS
+    }
+
+    fn execute_statement(statement: Box<Option<Statement>>, table: &mut Table) -> ExecuteResult {
+        let stmt = statement.unwrap();
+        match &stmt.stmt_type {
+            StatementType::STATEMENT_INSERT => execute_insert(&stmt, table),
+            StatementType::STATEMENT_SELECT => execute_select(&stmt, table),
+            _ => ExecuteResult::EXECUTE_FAIL
+        }
+    }
+
+    let mut table = Table::new();
     loop {
         print_prompt();
         let command = read_input();
@@ -164,11 +252,18 @@ fn main() {
         }
 
         let (stmt, prepare_result) = prepare_statement(&command);
-        if prepare_result == PREPARE_UNRECOGNIZED_STATEMENT {
-            println!("Unrecognized keyword at start of {}.", command);
-            continue;
+        match prepare_result {
+            PREPARE_UNRECOGNIZED_STATEMENT => {
+                println!("Unrecognized keyword at start of {}.", command);
+                continue;
+            },
+            PREPARE_SYNTAX_ERROR => {
+                println!("Syntax error. Could not parse statement.");
+                continue;
+            }
+            _ => {}
         }
-        execute_statement(stmt);
+        execute_statement(stmt, &mut table);
         println!("Executed.");
     }
 }
