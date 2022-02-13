@@ -43,28 +43,26 @@ pub struct Row {
     email: String
 }
 
-impl Row {
-
-    fn new() -> Self {
-        Row {
-            id: 0,
-            username: String::new(),
-            email: String::new()
-        }
-    }
-}
-
 struct Page {
     rows: Vec<Row>
 }
 
 impl Page {
 
+    fn new() -> Self {
+        Page {
+            rows: Vec::with_capacity(ROWS_PER_PAGE)
+        }
+    }
+
     unsafe fn row_slot(&self, index: usize) -> *const Row {
-        self.rows.().offset(index as isize)
+        self.rows.as_ptr().offset(index as isize)
     }
 
     unsafe fn row_mut_slot(&mut self, index: usize) -> *mut Row {
+        if self.rows.capacity() <= 0 {
+            self.rows.reserve(ROWS_PER_PAGE);
+        }
         self.rows.as_mut_ptr().offset(index as isize)
     }
 }
@@ -83,7 +81,7 @@ impl Table {
         }
     }
 
-    unsafe fn page_slot(&mut self, index: usize) -> *const Page {
+    unsafe fn page_slot(&self, index: usize) -> *const Page {
         self.pages.as_ptr().offset(index as isize)
     }
 
@@ -131,43 +129,17 @@ fn main() {
         MetaCommandResult::META_COMMAND_UNRECOGNIZED_COMMAND
     }
 
-    fn serialize_row(row: &Row) -> Box<Vec<u8>> {
-        let mut buf = vec![];
-        buf.write(row.id.to_ne_bytes().as_slice());
-        write_attribute(&mut buf, row.username.as_str(), USERNAME_SIZE);
-        write_attribute(&mut buf, row.email.as_str(), EMAIL_SIZE);
-        Box::new(buf)
+    unsafe fn row_mut_slot(table: &mut Table, row_num: usize) -> *mut Row {
+        let page = table.page_mut_slot(row_num / ROWS_PER_PAGE);
+        (*page).row_mut_slot(row_num % ROWS_PER_PAGE)
     }
 
-    fn row_slot(table: &mut Table, row_num: usize) -> Option<&Row> {
-        let page_num = row_num / ROWS_PER_PAGE;
-        let row_offset = row_num % ROWS_PER_PAGE;
-        unsafe {
-            let mut page = table.page_mut_slot(page_num);
-            page.row_mut_slot(row_offset);
-            Some()
+    unsafe fn row_slot(table: &Table, row_num: usize) -> *const Row {
+        let page = table.page_slot(row_num / ROWS_PER_PAGE);
+        if page.is_null() {
+            return std::ptr::null();
         }
-    }
-
-    fn write_attribute(writer: &mut dyn Write, attr: &str, len: usize) {
-        let attr_bytes = attr.as_bytes();
-        writer.write(attr_bytes);
-        writer.write(vec![0; len - attr_bytes.len()].as_slice());
-    }
-
-    fn deserialize_row(buf: &Vec<u8>) -> Box<Row>{
-        let mut reader = Cursor::new(buf);
-        let mut id_bytes = [0; ID_SIZE];
-        reader.read_exact(&mut id_bytes);
-        let mut username_bytes = [0; USERNAME_SIZE];
-        reader.read_exact(&mut username_bytes);
-        let mut email_bytes = [0; EMAIL_SIZE];
-        reader.read_exact(&mut email_bytes);
-        Box::new(Row {
-            id: u32::from_ne_bytes(id_bytes),
-            username: String::from_utf8(Vec::from(username_bytes)).unwrap(),
-            email: String::from_utf8(Vec::from(email_bytes)).unwrap()
-        })
+        (*page).row_slot(row_num % ROWS_PER_PAGE)
     }
 
     fn prepare_statement(command: &str) -> (Box<Option<Statement>>, PrepareResult) {
@@ -205,11 +177,19 @@ fn main() {
 
     fn execute_insert(statement: &Statement, table: &mut Table) -> ExecuteResult {
         match statement.row_to_insert.as_ref() {
-            Some(row) => {
+            Some(row_to_insert) => {
                 if table.num_rows > TABLE_MAX_ROWS {
                     return EXECUTE_TABLE_FULL;
                 }
-                let buf = serialize_row(row);
+
+                unsafe {
+                    let row = row_mut_slot(table, table.num_rows);
+                    std::ptr::write(row, Row {
+                        id: (*row_to_insert).id,
+                        username: String::from((*row_to_insert).username.as_str()),
+                        email: String::from((*row_to_insert).email.as_str())
+                    });
+                }
                 table.num_rows += 1;
                 EXECUTE_SUCCESS
             },
@@ -219,9 +199,9 @@ fn main() {
 
     fn execute_select(statement: &Statement, table: &Table) -> ExecuteResult {
         for i in 0..table.num_rows {
-            let page = &table.pages[i];
-            for j in 0..page.len() {
-                deserialize_row(&page[j])
+            unsafe {
+                let row = row_slot(table, i);
+                println!("{}, {}, {}", (*row).id, (*row).username, (*row).email)
             }
         }
         EXECUTE_SUCCESS
