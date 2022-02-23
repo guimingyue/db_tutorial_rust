@@ -2,7 +2,7 @@ use std::io;
 use std::io::{Cursor, Read, Write};
 use std::process;
 use crate::ExecuteResult::{EXECUTE_FAIL, EXECUTE_SUCCESS, EXECUTE_TABLE_FULL};
-use crate::PrepareResult::{PREPARE_SUCCESS, PREPARE_SYNTAX_ERROR, PREPARE_UNRECOGNIZED_STATEMENT};
+use crate::PrepareResult::{PREPARE_NEGATIVE_ID, PREPARE_STRING_TOO_LONG, PREPARE_SUCCESS, PREPARE_SYNTAX_ERROR, PREPARE_UNRECOGNIZED_STATEMENT};
 
 #[derive(PartialEq)]
 pub enum MetaCommandResult {
@@ -14,7 +14,9 @@ pub enum MetaCommandResult {
 pub enum PrepareResult {
     PREPARE_SUCCESS,
     PREPARE_UNRECOGNIZED_STATEMENT,
-    PREPARE_SYNTAX_ERROR
+    PREPARE_SYNTAX_ERROR,
+    PREPARE_STRING_TOO_LONG,
+    PREPARE_NEGATIVE_ID
 }
 
 #[derive(PartialEq)]
@@ -142,36 +144,44 @@ fn main() {
         (*page).row_slot(row_num % ROWS_PER_PAGE)
     }
 
-    fn prepare_statement(command: &str) -> (Box<Option<Statement>>, PrepareResult) {
-        let mut stmt = if command.starts_with("insert") {
-            let splits: Vec<&str> = command.split(" ").collect();
-            if splits.len() < 4 {
-               return (Box::new(None), PREPARE_SYNTAX_ERROR)
-            }
-            Statement {
-                stmt_type: StatementType::STATEMENT_INSERT,
-                row_to_insert: Some(Row {
-                    id: splits[1].trim().parse().unwrap(),
-                    username: String::from(splits[2].trim()),
-                    email: String::from(splits[3].trim())
-                })
-            }
+    fn prepare_insert(command: &str) -> Result<Box<Option<Statement>>, PrepareResult> {
+        let splits: Vec<&str> = command.split(" ").collect();
+        if splits.len() < 4 {
+            return Err(PREPARE_SYNTAX_ERROR);
+        }
+        let id = splits[1].trim().parse().unwrap();
+        if id < 0 {
+            return Err(PREPARE_NEGATIVE_ID);
+        }
+        let username = splits[2].trim();
+        if username.len() > USERNAME_SIZE {
+            return Err(PREPARE_STRING_TOO_LONG);
+        }
+        let email = splits[3].trim();
+        if email.len() > EMAIL_SIZE {
+            return Err(PREPARE_STRING_TOO_LONG);
+        }
+        Ok(Box::new(Some(Statement {
+            stmt_type: StatementType::STATEMENT_INSERT,
+            row_to_insert: Some(Row {
+                id,
+                // TODO, use lifetimes of command parameter
+                username: String::from(username),
+                email: String::from(email)
+            })
+        })))
+    }
+
+    fn prepare_statement(command: &str) -> Result<Box<Option<Statement>>, PrepareResult> {
+        if command.starts_with("insert") {
+            prepare_insert(command)
         } else if command.starts_with("select") {
-            Statement {
+            Ok(Box::new(Some(Statement {
                 stmt_type: StatementType::STATEMENT_SELECT,
                 row_to_insert: None
-            }
+            })))
         } else {
-            Statement {
-                stmt_type: StatementType::STATEMENT_UNSUPPORTED,
-                row_to_insert: None
-            }
-        };
-
-        if stmt.stmt_type == StatementType::STATEMENT_UNSUPPORTED {
-            (Box::new(Some(stmt)), PREPARE_UNRECOGNIZED_STATEMENT)
-        } else {
-            (Box::new(Some(stmt)), PREPARE_SUCCESS)
+            Err(PREPARE_UNRECOGNIZED_STATEMENT)
         }
     }
 
@@ -231,19 +241,24 @@ fn main() {
             }
         }
 
-        let (stmt, prepare_result) = prepare_statement(&command);
-        match prepare_result {
-            PREPARE_UNRECOGNIZED_STATEMENT => {
-                println!("Unrecognized keyword at start of {}.", command);
-                continue;
-            },
-            PREPARE_SYNTAX_ERROR => {
-                println!("Syntax error. Could not parse statement.");
+        match prepare_statement(&command) {
+            Ok(stmt) => execute_statement(stmt, &mut table),
+            Err(prepare_result) => {
+                match prepare_result {
+                    PREPARE_UNRECOGNIZED_STATEMENT =>
+                        println!("Unrecognized keyword at start of {}.", command),
+                    PREPARE_SYNTAX_ERROR =>
+                        println!("Syntax error. Could not parse statement."),
+                    PREPARE_STRING_TOO_LONG =>
+                        println!("String is too long."),
+                    PREPARE_NEGATIVE_ID =>
+                        println!("ID must be positive."),
+                    _ => {},
+                };
                 continue;
             }
-            _ => {}
-        }
-        execute_statement(stmt, &mut table);
+
+        };
         println!("Executed.");
     }
 }
