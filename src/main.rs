@@ -1,3 +1,4 @@
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{Cursor, Read, Write};
 use std::process;
@@ -69,16 +70,16 @@ impl Page {
     }
 }
 
-pub struct Table {
-    num_rows: usize,
+pub struct Pager {
+    file_descriptor: File,
     pages: Vec<Page>
 }
 
-impl Table {
+impl Pager {
 
-    fn new() -> Self {
-        Table {
-            num_rows: 0,
+    fn new(file: File) -> Self {
+        Pager {
+            file_descriptor: file,
             pages: Vec::with_capacity(TABLE_MAX_PAGES)
         }
     }
@@ -91,8 +92,54 @@ impl Table {
         self.pages.as_mut_ptr().offset(index as isize)
     }
 
+    fn file_length(&self) -> u64 {
+        self.file_descriptor.metadata()?.len()
+    }
+
+    fn num_pages(&self) -> usize {
+        let mut num_page = self.file_length() / PAGE_SIZE as u64;
+        if self.file_length() % PAGE_SIZE as u64 != 0 {
+            num_page += 1;
+        }
+        num_page as usize
+    }
+
+    unsafe fn get_page(&mut self, page_num: usize) -> *mut Page {
+        if page_num > TABLE_MAX_PAGES {
+            panic!("Tried to fetch page number out of bounds. {} > {}", page_num, TABLE_MAX_PAGES);
+        }
+        let mut page = self.page_mut_slot(page_num);
+        if page.is_null() {
+            // allocate page memory
+            let mut new_page = Page::new();
+            page = &mut new_page as *mut Page;
+            if page_num < self.num_pages() {
+                // TODO lseek to page offset and read page data.
+            }
+            // TODO assign this page to the element of self.pages
+        }
+        page
+    }
+
+
     fn free(&mut self) {
         // TODO
+    }
+}
+
+pub struct Table {
+    num_rows: usize,
+    pager: Pager
+}
+
+impl Table {
+
+    fn new(pager: Pager) -> Self {
+        let file_length = pager.file_length();
+        Table {
+            pager,
+            num_rows: file_length as usize / ROW_SIZE
+        }
     }
 }
 
@@ -129,6 +176,21 @@ fn main() {
             process::exit(0x0100);
         }
         MetaCommandResult::META_COMMAND_UNRECOGNIZED_COMMAND
+    }
+
+    fn pager_open(file_name: &str) -> Pager {
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .read(true)
+            .open(file_name)?;
+
+        Pager::new(file)
+    }
+
+    fn db_open(file_name: &str) -> Table {
+        let pager = pager_open(file_name);
+        Table::new(pager)
     }
 
     unsafe fn row_mut_slot(table: &mut Table, row_num: usize) -> *mut Row {
@@ -226,7 +288,7 @@ fn main() {
         }
     }
 
-    let mut table = Table::new();
+    let mut table = db_open();
     loop {
         print_prompt();
         let command = read_input();
