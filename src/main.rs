@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::{env, io};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::process;
 use crate::ExecuteResult::{EXECUTE_FAIL, EXECUTE_SUCCESS, EXECUTE_TABLE_FULL};
@@ -135,10 +135,10 @@ impl Pager {
             panic!("Tried to fetch page number out of bounds. {} > {}", page_num, TABLE_MAX_PAGES);
         }
         let mut page = self.page_mut_slot(page_num);
-        if page.is_null() {
+        if (*page).rows.capacity() == 0 {
             // allocate page memory
             let mut new_page = Page::new();
-            if page_num < self.num_pages() {
+            if page_num <= self.num_pages() {
                 self.file_descriptor.seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
                 let mut buf = [0; PAGE_SIZE];
                 let result = self.file_descriptor.read(&mut buf);
@@ -236,7 +236,7 @@ fn main() {
     fn pager_open(file_name: &str) -> Pager {
         let file = OpenOptions::new()
             .write(true)
-            .create_new(true)
+            .create(true)
             .read(true)
             .open(file_name)
             .unwrap();
@@ -261,7 +261,7 @@ fn main() {
     }
 
     unsafe fn row_mut_slot(table: &mut Table, row_num: usize) -> *mut Row {
-        let page = table.pager.page_mut_slot(row_num / ROWS_PER_PAGE);
+        let page = table.pager.get_page(row_num / ROWS_PER_PAGE);
         (*page).row_mut_slot(row_num % ROWS_PER_PAGE)
     }
 
@@ -336,12 +336,12 @@ fn main() {
         }
     }
 
-    fn execute_select(statement: &Statement, table: &Table) -> ExecuteResult {
+    fn execute_select(statement: &Statement, table: &mut Table) -> ExecuteResult {
         for i in 0..table.num_rows {
-            /*unsafe {
+            unsafe {
                 let row = row_slot(table, i);
                 println!("{}, {}, {}", (*row).id, (*row).username, (*row).email)
-            }*/
+            }
         }
         EXECUTE_SUCCESS
     }
@@ -355,7 +355,12 @@ fn main() {
         }
     }
 
-    let mut table = db_open("");
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        println!("Must supply a database filename.");
+        process::exit(0x0100);
+    }
+    let mut table = db_open(args[1].as_str());
     loop {
         print_prompt();
         let command = read_input();
