@@ -84,9 +84,9 @@ impl Page {
         }
     }
 
-    fn load(&mut self, bytes: &[u8; 4096]) {
+    fn load(&mut self, bytes: &[u8]) {
         let mut idx = 0;
-        while idx < bytes.len() {
+        while idx + ROW_SIZE < bytes.len() {
             let mut reader = Cursor::new(&bytes[idx..idx + ROW_SIZE]);
             let mut id_bytes = [0; ID_SIZE];
             reader.read_exact(&mut id_bytes);
@@ -286,17 +286,25 @@ fn main() {
         if username.len() > USERNAME_SIZE {
             return Err(PREPARE_STRING_TOO_LONG);
         }
+        let mut username_vec = vec![0; USERNAME_SIZE];
+        unsafe {
+            std::ptr::copy(username.as_ptr(), username_vec.as_mut_ptr(), username.len());
+        }
+
         let email = splits[3].trim();
         if email.len() > EMAIL_SIZE {
             return Err(PREPARE_STRING_TOO_LONG);
+        }
+        let mut email_vec = vec![0; EMAIL_SIZE];
+        unsafe {
+            std::ptr::copy(email.as_ptr(), email_vec.as_mut_ptr(), email.len());
         }
         Ok(Box::new(Some(Statement {
             stmt_type: StatementType::STATEMENT_INSERT,
             row_to_insert: Some(Row {
                 id,
-                // TODO, use lifetimes of command parameter
-                username: String::from(username),
-                email: String::from(email)
+                username: String::from_utf8(username_vec).unwrap(),
+                email: String::from_utf8(email_vec).unwrap()
             })
         })))
     }
