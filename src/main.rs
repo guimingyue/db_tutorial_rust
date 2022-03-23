@@ -69,14 +69,14 @@ impl Page {
         self.rows.as_mut_ptr().offset(index as isize)
     }
 
-    unsafe fn serialize(&self, buf: &mut Vec<u8>) {
+    unsafe fn serialize(&self, buf: &mut Vec<u8>, row_count: usize) {
         fn write_attribute(writer: &mut dyn Write, attr: &str, len: usize) {
             let attr_bytes = attr.as_bytes();
             writer.write(attr_bytes);
             writer.write(vec![0; len - attr_bytes.len()].as_slice());
         }
 
-        for i in 0..self.rows.len() {
+        for i in 0..row_count {
             let row = self.row_slot(i);
             buf.write((*row).id.to_ne_bytes().as_slice());
             write_attribute(buf, (*row).username.as_str(), USERNAME_SIZE);
@@ -85,8 +85,16 @@ impl Page {
     }
 
     fn load(&mut self, bytes: &[u8]) {
+        fn read_end_idx(bytes: &[u8]) -> usize {
+            for i in (0..bytes.len()).rev() {
+                if bytes[i] != 0 {
+                    return i;
+                }
+            }
+            0
+        }
         let mut idx = 0;
-        while idx + ROW_SIZE < bytes.len() {
+        while idx + ROW_SIZE <= bytes.len() {
             let mut reader = Cursor::new(&bytes[idx..idx + ROW_SIZE]);
             let mut id_bytes = [0; ID_SIZE];
             reader.read_exact(&mut id_bytes);
@@ -96,8 +104,8 @@ impl Page {
             reader.read_exact(&mut email_bytes);
             self.rows.push(Row {
                 id: u32::from_ne_bytes(id_bytes),
-                username: String::from_utf8(Vec::from(username_bytes)).unwrap(),
-                email: String::from_utf8(Vec::from(email_bytes)).unwrap()
+                username: String::from_utf8(Vec::from(&username_bytes[0..=read_end_idx(&username_bytes)])).unwrap(),
+                email: String::from_utf8(Vec::from(&email_bytes[0..=read_end_idx(&email_bytes)])).unwrap()
             });
             idx += ROW_SIZE;
         }
@@ -142,26 +150,27 @@ impl Pager {
                 self.file_descriptor.seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
                 let mut buf = [0; PAGE_SIZE];
                 let result = self.file_descriptor.read(&mut buf);
-                if let Err(errno) = result {
-                    println!("Error reading file: {}", errno);
-                    process::exit(0x0100);
-                }
-                new_page.load(&buf);
-                std::ptr::write(page, new_page);
+                match result {
+                    Ok(len) => {
+                        new_page.load(&buf[0..len]);
+                        std::ptr::write(page, new_page);
+                    },
+                    Err(errno) => {
+                        println!("Error reading file: {}", errno);
+                        process::exit(0x0100);
+                    }
+                };
             }
         }
         page
     }
 
-    pub fn flush_page(&mut self, page_num: usize) {
+    pub fn flush_page(&mut self, page_num: usize, row_count: usize) {
         unsafe {
             let page = self.page_slot(page_num);
-            if page.is_null() {
-                return;
-            }
             self.file_descriptor.seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
             let mut buf = vec![];
-            (*page).serialize(&mut buf);
+            (*page).serialize(&mut buf, row_count);
             self.file_descriptor.write(buf.as_slice());
             self.file_descriptor.flush();
         }
@@ -252,11 +261,11 @@ fn main() {
     fn db_close(table: &mut Table) {
         let num_full_pages = table.num_rows / ROWS_PER_PAGE;
         for i in 0..num_full_pages {
-            table.pager.flush_page(i);
+            table.pager.flush_page(i, ROWS_PER_PAGE);
         }
         let num_additional_rows = table.num_rows % ROWS_PER_PAGE;
         if num_additional_rows > 0 {
-            table.pager.flush_page(num_full_pages);
+            table.pager.flush_page(num_full_pages, num_additional_rows);
         }
     }
 
@@ -286,25 +295,17 @@ fn main() {
         if username.len() > USERNAME_SIZE {
             return Err(PREPARE_STRING_TOO_LONG);
         }
-        let mut username_vec = vec![0; USERNAME_SIZE];
-        unsafe {
-            std::ptr::copy(username.as_ptr(), username_vec.as_mut_ptr(), username.len());
-        }
 
         let email = splits[3].trim();
         if email.len() > EMAIL_SIZE {
             return Err(PREPARE_STRING_TOO_LONG);
         }
-        let mut email_vec = vec![0; EMAIL_SIZE];
-        unsafe {
-            std::ptr::copy(email.as_ptr(), email_vec.as_mut_ptr(), email.len());
-        }
         Ok(Box::new(Some(Statement {
             stmt_type: StatementType::STATEMENT_INSERT,
             row_to_insert: Some(Row {
                 id,
-                username: String::from_utf8(username_vec).unwrap(),
-                email: String::from_utf8(email_vec).unwrap()
+                username: String::from(username),
+                email: String::from(email)
             })
         })))
     }
