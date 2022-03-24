@@ -8,4 +8,5 @@ A Rust version of sqlite db implementation followed by the tutorial of [cstack/d
 |Part 3|Part 3 - An In-Memory, Append-Only, Single-Table Database|[part_3](https://github.com/guimingyue/db_tutorial_rust/tree/part_3)|Done|
 |Part 4|Part 3 - Our First Tests (and Bugs)|[part_4](https://github.com/guimingyue/db_tutorial_rust/tree/part_4)|Done|
 |Part 5|Part 5 - Persistence to Disk|[part_5](https://github.com/guimingyue/db_tutorial_rust/tree/part_5)|Done|
+|Part 6|Part 6 - The Cursor Abstraction|[part_6](https://github.com/guimingyue/db_tutorial_rust/tree/part_6)|Done|
 
