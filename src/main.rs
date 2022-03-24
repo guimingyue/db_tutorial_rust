@@ -1,5 +1,6 @@
-use std::io;
-use std::io::{Cursor, Read, Write};
+use std::fs::{File, OpenOptions};
+use std::{env, io};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::process;
 use crate::ExecuteResult::{EXECUTE_FAIL, EXECUTE_SUCCESS, EXECUTE_TABLE_FULL};
 use crate::PrepareResult::{PREPARE_NEGATIVE_ID, PREPARE_STRING_TOO_LONG, PREPARE_SUCCESS, PREPARE_SYNTAX_ERROR, PREPARE_UNRECOGNIZED_STATEMENT};
@@ -67,19 +68,111 @@ impl Page {
         }
         self.rows.as_mut_ptr().offset(index as isize)
     }
+
+    unsafe fn serialize(&self, buf: &mut Vec<u8>, row_count: usize) {
+        fn write_attribute(writer: &mut dyn Write, attr: &str, len: usize) {
+            let attr_bytes = attr.as_bytes();
+            writer.write(attr_bytes);
+            writer.write(vec![0; len - attr_bytes.len()].as_slice());
+        }
+
+        for i in 0..row_count {
+            let row = self.row_slot(i);
+            buf.write((*row).id.to_ne_bytes().as_slice());
+            write_attribute(buf, (*row).username.as_str(), USERNAME_SIZE);
+            write_attribute(buf, (*row).email.as_str(), EMAIL_SIZE);
+        }
+    }
+
+    fn load(&mut self, bytes: &[u8]) {
+        fn read_end_idx(bytes: &[u8]) -> usize {
+            for i in (0..bytes.len()).rev() {
+                if bytes[i] != 0 {
+                    return i;
+                }
+            }
+            0
+        }
+        let mut idx = 0;
+        while idx + ROW_SIZE <= bytes.len() {
+            let mut reader = Cursor::new(&bytes[idx..idx + ROW_SIZE]);
+            let mut id_bytes = [0; ID_SIZE];
+            reader.read_exact(&mut id_bytes);
+            let mut username_bytes = [0; USERNAME_SIZE];
+            reader.read_exact(&mut username_bytes);
+            let mut email_bytes = [0; EMAIL_SIZE];
+            reader.read_exact(&mut email_bytes);
+            self.rows.push(Row {
+                id: u32::from_ne_bytes(id_bytes),
+                username: String::from_utf8(Vec::from(&username_bytes[0..=read_end_idx(&username_bytes)])).unwrap(),
+                email: String::from_utf8(Vec::from(&email_bytes[0..=read_end_idx(&email_bytes)])).unwrap()
+            });
+            idx += ROW_SIZE;
+        }
+    }
 }
 
-pub struct Table {
-    num_rows: usize,
+pub struct Pager {
+    file_descriptor: File,
     pages: Vec<Page>
 }
 
-impl Table {
+impl Pager {
 
-    fn new() -> Self {
-        Table {
-            num_rows: 0,
+    fn new(file: File) -> Self {
+        Pager {
+            file_descriptor: file,
             pages: Vec::with_capacity(TABLE_MAX_PAGES)
+        }
+    }
+
+    fn file_length(&self) -> u64 {
+        self.file_descriptor.metadata().unwrap().len()
+    }
+
+    fn num_pages(&self) -> usize {
+        let mut num_page = self.file_length() / PAGE_SIZE as u64;
+        if self.file_length() % PAGE_SIZE as u64 != 0 {
+            num_page += 1;
+        }
+        num_page as usize
+    }
+
+    unsafe fn get_page(&mut self, page_num: usize) -> *mut Page {
+        if page_num > TABLE_MAX_PAGES {
+            panic!("Tried to fetch page number out of bounds. {} > {}", page_num, TABLE_MAX_PAGES);
+        }
+        let mut page = self.page_mut_slot(page_num);
+        if (*page).rows.capacity() == 0 {
+            // allocate page memory
+            let mut new_page = Page::new();
+            if page_num <= self.num_pages() {
+                self.file_descriptor.seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
+                let mut buf = [0; PAGE_SIZE];
+                let result = self.file_descriptor.read(&mut buf);
+                match result {
+                    Ok(len) => {
+                        new_page.load(&buf[0..len]);
+                        std::ptr::write(page, new_page);
+                    },
+                    Err(errno) => {
+                        println!("Error reading file: {}", errno);
+                        process::exit(0x0100);
+                    }
+                };
+            }
+        }
+        page
+    }
+
+    pub fn flush_page(&mut self, page_num: usize, row_count: usize) {
+        unsafe {
+            let page = self.page_slot(page_num);
+            self.file_descriptor.seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
+            let mut buf = vec![];
+            (*page).serialize(&mut buf, row_count);
+            self.file_descriptor.write(buf.as_slice());
+            self.file_descriptor.flush();
         }
     }
 
@@ -91,8 +184,25 @@ impl Table {
         self.pages.as_mut_ptr().offset(index as isize)
     }
 
-    fn free(&mut self) {
-        // TODO
+
+    fn close(&mut self) {
+        self.file_descriptor.flush();
+    }
+}
+
+pub struct Table {
+    num_rows: usize,
+    pager: Pager
+}
+
+impl Table {
+
+    fn new(pager: Pager) -> Self {
+        let file_length = pager.file_length();
+        Table {
+            pager,
+            num_rows: file_length as usize / ROW_SIZE
+        }
     }
 }
 
@@ -124,20 +234,48 @@ fn main() {
         String::from(input_buffer.trim())
     }
 
-    fn do_meta_command(command: &str) -> MetaCommandResult {
+    fn do_meta_command(command: &str, table: &mut Table) -> MetaCommandResult {
         if command.eq(".exit") {
+            db_close(table);
             process::exit(0x0100);
         }
         MetaCommandResult::META_COMMAND_UNRECOGNIZED_COMMAND
     }
 
+    fn pager_open(file_name: &str) -> Pager {
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .read(true)
+            .open(file_name)
+            .unwrap();
+
+        Pager::new(file)
+    }
+
+    fn db_open(file_name: &str) -> Table {
+        let pager = pager_open(file_name);
+        Table::new(pager)
+    }
+
+    fn db_close(table: &mut Table) {
+        let num_full_pages = table.num_rows / ROWS_PER_PAGE;
+        for i in 0..num_full_pages {
+            table.pager.flush_page(i, ROWS_PER_PAGE);
+        }
+        let num_additional_rows = table.num_rows % ROWS_PER_PAGE;
+        if num_additional_rows > 0 {
+            table.pager.flush_page(num_full_pages, num_additional_rows);
+        }
+    }
+
     unsafe fn row_mut_slot(table: &mut Table, row_num: usize) -> *mut Row {
-        let page = table.page_mut_slot(row_num / ROWS_PER_PAGE);
+        let page = table.pager.get_page(row_num / ROWS_PER_PAGE);
         (*page).row_mut_slot(row_num % ROWS_PER_PAGE)
     }
 
-    unsafe fn row_slot(table: &Table, row_num: usize) -> *const Row {
-        let page = table.page_slot(row_num / ROWS_PER_PAGE);
+    unsafe fn row_slot(table: &mut Table, row_num: usize) -> *const Row {
+        let page = table.pager.get_page(row_num / ROWS_PER_PAGE);
         if page.is_null() {
             return std::ptr::null();
         }
@@ -157,6 +295,7 @@ fn main() {
         if username.len() > USERNAME_SIZE {
             return Err(PREPARE_STRING_TOO_LONG);
         }
+
         let email = splits[3].trim();
         if email.len() > EMAIL_SIZE {
             return Err(PREPARE_STRING_TOO_LONG);
@@ -165,7 +304,6 @@ fn main() {
             stmt_type: StatementType::STATEMENT_INSERT,
             row_to_insert: Some(Row {
                 id,
-                // TODO, use lifetimes of command parameter
                 username: String::from(username),
                 email: String::from(email)
             })
@@ -207,7 +345,7 @@ fn main() {
         }
     }
 
-    fn execute_select(statement: &Statement, table: &Table) -> ExecuteResult {
+    fn execute_select(statement: &Statement, table: &mut Table) -> ExecuteResult {
         for i in 0..table.num_rows {
             unsafe {
                 let row = row_slot(table, i);
@@ -226,12 +364,17 @@ fn main() {
         }
     }
 
-    let mut table = Table::new();
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        println!("Must supply a database filename.");
+        process::exit(0x0100);
+    }
+    let mut table = db_open(args[1].as_str());
     loop {
         print_prompt();
         let command = read_input();
         if command.starts_with(".") {
-            let meta_result = do_meta_command(&command);
+            let meta_result = do_meta_command(&command, &mut table);
             match meta_result {
                 MetaCommandResult::META_COMMAND_UNRECOGNIZED_COMMAND => {
                     println!("Unrecognized command {}", command);
