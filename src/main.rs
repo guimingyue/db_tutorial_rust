@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::{env, io};
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::process;
 use crate::ExecuteResult::{EXECUTE_FAIL, EXECUTE_SUCCESS, EXECUTE_TABLE_FULL};
 use crate::PrepareResult::{PREPARE_NEGATIVE_ID, PREPARE_STRING_TOO_LONG, PREPARE_SUCCESS, PREPARE_SYNTAX_ERROR, PREPARE_UNRECOGNIZED_STATEMENT};
@@ -46,7 +46,7 @@ pub struct Row {
     email: String
 }
 
-struct Page {
+pub struct Page {
     rows: Vec<Row>
 }
 
@@ -95,7 +95,7 @@ impl Page {
         }
         let mut idx = 0;
         while idx + ROW_SIZE <= bytes.len() {
-            let mut reader = Cursor::new(&bytes[idx..idx + ROW_SIZE]);
+            let mut reader = std::io::Cursor::new(&bytes[idx..idx + ROW_SIZE]);
             let mut id_bytes = [0; ID_SIZE];
             reader.read_exact(&mut id_bytes);
             let mut username_bytes = [0; USERNAME_SIZE];
@@ -206,6 +206,60 @@ impl Table {
     }
 }
 
+pub struct Cursor<'a> {
+    table: &'a mut Table,
+    row_num: usize,
+    end_of_table: bool
+}
+
+impl <'a> Cursor<'a> {
+
+    pub fn table_start(table: &'a mut Table) -> Self {
+        let end_of_table = table.num_rows == 0;
+        Cursor {
+            table,
+            row_num: 0,
+            end_of_table
+        }
+    }
+
+    pub fn table_end(table: &'a mut Table) -> Self {
+        Cursor {
+            row_num: table.num_rows,
+            end_of_table: true,
+            table
+        }
+    }
+
+    pub fn get_page(&mut self) -> *mut Page{
+        let row_num = self.row_num;
+        unsafe {
+            self.table.pager.get_page(row_num / ROWS_PER_PAGE)
+        }
+    }
+
+    pub fn advance(&mut self) {
+        self.row_num += 1;
+        if self.row_num >= self.table.num_rows {
+            self.end_of_table = true;
+        }
+    }
+
+    pub fn cursor_mut_value(&mut self) -> *mut Row{
+        let page = self.get_page();
+        unsafe {
+            (*page).row_mut_slot(self.row_num % ROWS_PER_PAGE)
+        }
+    }
+
+    pub fn cursor_value(&mut self) -> *const Row{
+        let page = self.get_page();
+        unsafe {
+            (*page).row_mut_slot(self.row_num % ROWS_PER_PAGE)
+        }
+    }
+}
+
 const ID_SIZE: usize = std::mem::size_of::<u32>();
 const USERNAME_SIZE: usize = 32;
 const EMAIL_SIZE: usize = 255;
@@ -269,19 +323,6 @@ fn main() {
         }
     }
 
-    unsafe fn row_mut_slot(table: &mut Table, row_num: usize) -> *mut Row {
-        let page = table.pager.get_page(row_num / ROWS_PER_PAGE);
-        (*page).row_mut_slot(row_num % ROWS_PER_PAGE)
-    }
-
-    unsafe fn row_slot(table: &mut Table, row_num: usize) -> *const Row {
-        let page = table.pager.get_page(row_num / ROWS_PER_PAGE);
-        if page.is_null() {
-            return std::ptr::null();
-        }
-        (*page).row_slot(row_num % ROWS_PER_PAGE)
-    }
-
     fn prepare_insert(command: &str) -> Result<Box<Option<Statement>>, PrepareResult> {
         let splits: Vec<&str> = command.split(" ").collect();
         if splits.len() < 4 {
@@ -330,8 +371,9 @@ fn main() {
                     return EXECUTE_TABLE_FULL;
                 }
 
+                let mut cursor = Cursor::table_end(table);
+                let row = cursor.cursor_mut_value();
                 unsafe {
-                    let row = row_mut_slot(table, table.num_rows);
                     std::ptr::write(row, Row {
                         id: (*row_to_insert).id,
                         username: String::from((*row_to_insert).username.as_str()),
@@ -346,11 +388,13 @@ fn main() {
     }
 
     fn execute_select(statement: &Statement, table: &mut Table) -> ExecuteResult {
-        for i in 0..table.num_rows {
+        let mut cursor = Cursor::table_start(table);
+        while !cursor.end_of_table {
+            let row = cursor.cursor_value();
             unsafe {
-                let row = row_slot(table, i);
                 println!("{}, {}, {}", (*row).id, (*row).username, (*row).email)
             }
+            cursor.advance();
         }
         EXECUTE_SUCCESS
     }
