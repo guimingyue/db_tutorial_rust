@@ -107,9 +107,10 @@ impl Page {
         self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize
     }
 
-    fn index(&self, offset: usize) -> u8 {
+    fn index(&self, offset: usize) -> *mut u8 {
+        let ptr = self.buf.as_ptr();
         unsafe {
-            (self.buf.as_ptr() as u8).checked_add(offset as u8).unwrap()
+            (ptr as isize).checked_add(offset as isize).unwrap() as *mut u8
         }
     }
 
@@ -126,8 +127,9 @@ impl Page {
     }
 
     fn initialize_leaf_node(&mut self) {
+        let ptr = self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize;
         unsafe {
-            *(self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize) = 0;
+            *ptr = 0;
         }
     }
 
@@ -145,7 +147,7 @@ impl Page {
 
 pub struct Pager {
     file_descriptor: File,
-    pages: Vec<Page>
+    pages: Vec<Option<Box<Page>>>
 }
 
 impl Pager {
@@ -153,7 +155,7 @@ impl Pager {
     fn new(file: File) -> Self {
         Pager {
             file_descriptor: file,
-            pages: Vec::with_capacity(TABLE_MAX_PAGES),
+            pages: std::iter::repeat_with(|| None).take(TABLE_MAX_PAGES).collect::<Vec<_>>()
         }
     }
 
@@ -170,48 +172,47 @@ impl Pager {
         num_page as usize
     }
 
-    unsafe fn get_page(&mut self, page_num: usize) -> *mut Page {
+    unsafe fn get_page(&mut self, page_num: usize) -> &mut Page {
         if page_num > TABLE_MAX_PAGES {
             panic!("Tried to fetch page number out of bounds. {} > {}", page_num, TABLE_MAX_PAGES);
         }
-        let mut page = self.page_mut_slot(page_num);
-        if page.is_null() {
+        let page = &self.pages[page_num];
+        if page.is_none() {
             // allocate page memory
+            let mut new_page = Page::new();
             if page_num <= self.num_pages() {
-                let mut new_page = Page::new();
                 self.file_descriptor.seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
                 let result = self.file_descriptor.read(&mut new_page.buf);
-                match result {
-                    Ok(len) => {
-                        // new_page.load(&buf[0..len]);
-                        std::ptr::write(page, new_page);
-                    },
-                    Err(errno) => {
-                        println!("Error reading file: {}", errno);
-                        process::exit(0x0100);
-                    }
-                };
+                if result.is_err() {
+                    println!("Error reading file: {}", result.unwrap());
+                    process::exit(0x0100);
+                }
             }
+            self.pages[page_num] = Some(Box::new(new_page));
         }
-        page
+        let page = &mut self.pages[page_num];
+        page.as_mut().unwrap()
     }
 
     pub fn pager_flush(&mut self, page_num: usize) {
-        unsafe {
-            let page = self.page_slot(page_num);
-            self.file_descriptor.seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
-            self.file_descriptor.write((*page).buf.as_slice());
-            self.file_descriptor.flush();
+        match &self.pages[page_num] {
+            Some(page) => {
+                self.file_descriptor.seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
+                self.file_descriptor.write((*page).buf.as_slice());
+                self.file_descriptor.flush();
+            },
+            None => ()
+
         }
     }
 
-    unsafe fn page_slot(&self, index: usize) -> *const Page {
+    /*unsafe fn page_slot(&self, index: usize) -> *const Page {
         self.pages.as_ptr().offset(index as isize)
     }
 
     unsafe fn page_mut_slot(&mut self, index: usize) -> *mut Page {
         self.pages.as_mut_ptr().offset(index as isize)
-    }
+    }*/
 
 
     fn close(&mut self) {
@@ -369,12 +370,9 @@ fn main() {
 
     fn read_input() -> String {
         let mut input_buffer = String::new();
-        let bytes_read =  io::stdin()
+        io::stdin()
             .read_line(&mut input_buffer)
             .expect("Failed to read line");
-        if bytes_read < 0 {
-            panic!("Error reading input")
-        }
         String::from(input_buffer.trim())
     }
 
@@ -398,8 +396,8 @@ fn main() {
         let mut pager = Pager::new(file);
         if pager.num_pages() == 0 {
             unsafe {
-                let mut root_node = pager.get_page(0);
-                (*root_node).initialize_leaf_node();
+                let root_node = pager.get_page(0);
+                root_node.initialize_leaf_node();
             }
         }
         pager
@@ -421,10 +419,11 @@ fn main() {
         if splits.len() < 4 {
             return Err(PREPARE_SYNTAX_ERROR);
         }
-        let id = splits[1].trim().parse().unwrap();
+        let id: i32 = splits[1].trim().parse().unwrap();
         if id < 0 {
             return Err(PREPARE_NEGATIVE_ID);
         }
+        let id = id as u32;
         let username = splits[2].trim();
         if username.len() > USERNAME_SIZE {
             return Err(PREPARE_STRING_TOO_LONG);
