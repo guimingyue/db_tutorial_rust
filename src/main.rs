@@ -313,10 +313,9 @@ impl <'a> Cursor<'a> {
         *(page.leaf_node_key(cell_num)) = key;
 
         let row = page.leaf_node_value(cell_num);
-        let src_row_ptr = value as *const Row;
-        std::ptr::copy(src_row_ptr as *const u8, row as *mut u8, ID_SIZE);
-        std::ptr::copy((src_row_ptr as u8 + USERNAME_OFFSET as u8) as *const u8, (row as u8 + USERNAME_OFFSET as u8) as *mut u8, USERNAME_SIZE);
-        std::ptr::copy((src_row_ptr  as u8 + EMAIL_OFFSET  as u8) as *const u8, (row as u8 + EMAIL_OFFSET as u8) as *mut u8, EMAIL_SIZE);
+        (*row).id = value.id;
+        (*row).username = value.username.clone();
+        (*row).email = value.email.clone();
     }
 
 
