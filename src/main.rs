@@ -107,14 +107,14 @@ impl Page {
         self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize
     }
 
-    fn index(&self, offset: usize) -> *mut u8 {
+    fn index(&self, offset: usize) -> isize {
         let ptr = self.buf.as_ptr();
         unsafe {
-            (ptr as isize).checked_add(offset as isize).unwrap() as *mut u8
+            (ptr as isize).checked_add(offset as isize).unwrap()
         }
     }
 
-    fn leaf_node_cell(&self, cell_num: usize) -> * const usize {
+    fn leaf_node_cell(&self, cell_num: usize) -> *const usize {
         (self.index(LEAF_NODE_HEADER_SIZE + cell_num * LEAF_NODE_CELL_SIZE)) as *const usize
     }
 
@@ -172,7 +172,7 @@ impl Pager {
         num_page as usize
     }
 
-    unsafe fn get_page(&mut self, page_num: usize) -> &mut Page {
+    fn get_page(&mut self, page_num: usize) -> &mut Page {
         if page_num > TABLE_MAX_PAGES {
             panic!("Tried to fetch page number out of bounds. {} > {}", page_num, TABLE_MAX_PAGES);
         }
@@ -260,7 +260,7 @@ impl <'a> Cursor<'a> {
     }
 
     pub fn table_end(table: &'a mut Table) -> Self {
-        let root_node = unsafe { table.pager.get_page(table.root_page_num) };
+        let root_node = table.pager.get_page(table.root_page_num);
         let num_cells = unsafe { *((*root_node).leaf_node_num_cells()) };
         Cursor {
             page_num: table.root_page_num,
@@ -270,10 +270,8 @@ impl <'a> Cursor<'a> {
         }
     }
 
-    pub fn get_page(&mut self) -> *mut Page{
-        unsafe {
-            self.table.pager.get_page(self.page_num)
-        }
+    pub fn get_page(&mut self) -> &mut Page{
+        self.table.pager.get_page(self.page_num)
     }
 
     pub fn advance(&mut self) {
@@ -287,35 +285,34 @@ impl <'a> Cursor<'a> {
     }
 
     pub fn cursor_mut_value(&mut self) -> *mut Row{
+        let cell_num = self.cell_num;
         let page = self.get_page();
-        unsafe {
-            (*page).leaf_node_value(self.cell_num)
-        }
+        page.leaf_node_value(cell_num)
     }
 
     pub fn cursor_value(&mut self) -> *const Row{
+        let cell_num = self.cell_num;
         let page = self.get_page();
-        unsafe {
-            (*page).row_mut_slot(self.cell_num)
-        }
+        unsafe { page.row_mut_slot(cell_num) }
     }
 
     pub unsafe fn leaf_node_insert(&mut self, key: u32, value: &Row) {
+        let cell_num = self.cell_num;
         let page = self.get_page();
-        let num_cells = (*page).leaf_node_num_cells();
+        let num_cells = page.leaf_node_num_cells();
         if *num_cells > LEAF_NODE_MAX_CELLS {
             println!("Need to implement splitting a leaf node.");
             // TODO
             process::exit(-1);
         }
-        if self.cell_num < *num_cells {
+        if cell_num < *num_cells {
             // shift cell from cell_num to num_cells to right to make room for new cell
             // TODO
         }
         (*num_cells) += 1;
-        *((*page).leaf_node_key(self.cell_num)) = key;
+        *(page.leaf_node_key(cell_num)) = key;
 
-        let row = (*page).leaf_node_value(self.cell_num);
+        let row = page.leaf_node_value(cell_num);
         let src_row_ptr = value as *const Row;
         std::ptr::copy(src_row_ptr as *const u8, row as *mut u8, ID_SIZE);
         std::ptr::copy((src_row_ptr as u8 + USERNAME_OFFSET as u8) as *const u8, (row as u8 + USERNAME_OFFSET as u8) as *mut u8, USERNAME_SIZE);
@@ -461,7 +458,7 @@ fn main() {
             Some(row_to_insert) => {
                 unsafe {
                     let page = table.pager.get_page(table.root_page_num);
-                    if (*page).is_full() {
+                    if page.is_full() {
                         return EXECUTE_TABLE_FULL;
                     }
                 }
