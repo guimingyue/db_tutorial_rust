@@ -63,20 +63,7 @@ impl Page {
         }
     }
 
-    unsafe fn row_slot(&self, index: usize) -> *const Row {
-        // self.rows.as_ptr().offset(index as isize)
-        std::ptr::null()
-    }
-
-    unsafe fn row_mut_slot(&mut self, index: usize) -> *mut Row {
-        /*if self.rows.capacity() <= 0 {
-            self.rows.reserve(ROWS_PER_PAGE);
-        }
-        self.rows.as_mut_ptr().offset(index as isize)*/
-        std::ptr::null_mut()
-    }
-
-    fn load(&mut self, bytes: &[u8]) {
+    unsafe fn row_mut_slot(&mut self, cell_num: usize) -> Box<Row> {
         fn read_end_idx(bytes: &[u8]) -> usize {
             for i in (0..bytes.len()).rev() {
                 if bytes[i] != 0 {
@@ -85,6 +72,20 @@ impl Page {
             }
             0
         }
+        let cell = self.leaf_node_value(cell_num);
+
+        let id = std::ptr::read(cell as *const u32);
+        let username_bytes = std::ptr::read((cell as usize + USERNAME_OFFSET) as *const [u8; USERNAME_SIZE]);
+        let email_bytes = std::ptr::read((cell as usize + EMAIL_OFFSET) as *const [u8; EMAIL_SIZE]);
+
+        Box::new(Row {
+            id,
+            username: String::from_utf8_unchecked(Vec::from(&username_bytes[0..=read_end_idx(&username_bytes)])),
+            email: String::from_utf8_unchecked(Vec::from(&email_bytes[0..=read_end_idx(&email_bytes)]))
+        })
+    }
+
+    fn load(&mut self, bytes: &[u8]) {
         let mut idx = 0;
         while idx + ROW_SIZE <= bytes.len() {
             let mut reader = std::io::Cursor::new(&bytes[idx..idx + ROW_SIZE]);
@@ -94,11 +95,6 @@ impl Page {
             reader.read_exact(&mut username_bytes);
             let mut email_bytes = [0; EMAIL_SIZE];
             reader.read_exact(&mut email_bytes);
-            /*self.rows.push(Row {
-                id: u32::from_ne_bytes(id_bytes),
-                username: String::from_utf8(Vec::from(&username_bytes[0..=read_end_idx(&username_bytes)])).unwrap(),
-                email: String::from_utf8(Vec::from(&email_bytes[0..=read_end_idx(&email_bytes)])).unwrap()
-            });*/
             idx += ROW_SIZE;
         }
     }
@@ -122,8 +118,8 @@ impl Page {
         self.leaf_node_cell(cell_num) as *mut u32
     }
 
-    fn leaf_node_value(&self, cell_num: usize) -> *mut Row {
-        self.index(LEAF_NODE_HEADER_SIZE + cell_num * LEAF_NODE_CELL_SIZE + LEAF_NODE_KEY_SIZE) as *mut Row
+    fn leaf_node_value(&self, cell_num: usize) -> *mut u8 {
+        self.index(LEAF_NODE_HEADER_SIZE + cell_num * LEAF_NODE_CELL_SIZE + LEAF_NODE_KEY_SIZE) as *mut u8
     }
 
     fn initialize_leaf_node(&mut self) {
@@ -147,29 +143,26 @@ impl Page {
 
 pub struct Pager {
     file_descriptor: File,
-    pages: Vec<Option<Box<Page>>>
+    pages: Vec<Option<Box<Page>>>,
+    num_pages: usize
 }
 
 impl Pager {
 
     fn new(file: File) -> Self {
+        fn num_pages_file(file_length: u64) -> usize {
+            let mut num_page = file_length / PAGE_SIZE as u64;
+            if file_length % PAGE_SIZE as u64 != 0 {
+                println!("Db file is not a whole number of pages. Corrupt file.");
+                process::exit(0x0100);
+            }
+            num_page as usize
+        }
         Pager {
+            num_pages: num_pages_file(file.metadata().unwrap().len()),
             file_descriptor: file,
             pages: std::iter::repeat_with(|| None).take(TABLE_MAX_PAGES).collect::<Vec<_>>()
         }
-    }
-
-    fn file_length(&self) -> u64 {
-        self.file_descriptor.metadata().unwrap().len()
-    }
-
-    fn num_pages(&self) -> usize {
-        let mut num_page = self.file_length() / PAGE_SIZE as u64;
-        if self.file_length() % PAGE_SIZE as u64 != 0 {
-            println!("Db file is not a whole number of pages. Corrupt file.");
-            process::exit(0x0100);
-        }
-        num_page as usize
     }
 
     fn get_page(&mut self, page_num: usize) -> &mut Page {
@@ -178,9 +171,9 @@ impl Pager {
         }
         let page = &self.pages[page_num];
         if page.is_none() {
-            // allocate page memory
+            // create a page in memory
             let mut new_page = Page::new();
-            if page_num <= self.num_pages() {
+            if page_num <= self.num_pages {
                 self.file_descriptor.seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
                 let result = self.file_descriptor.read(&mut new_page.buf);
                 if result.is_err() {
@@ -189,6 +182,9 @@ impl Pager {
                 }
             }
             self.pages[page_num] = Some(Box::new(new_page));
+            if page_num >= self.num_pages {
+                self.num_pages += 1;
+            }
         }
         let page = &mut self.pages[page_num];
         page.as_mut().unwrap()
@@ -198,22 +194,13 @@ impl Pager {
         match &self.pages[page_num] {
             Some(page) => {
                 self.file_descriptor.seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
-                self.file_descriptor.write((*page).buf.as_slice());
+                self.file_descriptor.write(page.buf.as_slice());
                 self.file_descriptor.flush();
             },
             None => ()
 
         }
     }
-
-    /*unsafe fn page_slot(&self, index: usize) -> *const Page {
-        self.pages.as_ptr().offset(index as isize)
-    }
-
-    unsafe fn page_mut_slot(&mut self, index: usize) -> *mut Page {
-        self.pages.as_mut_ptr().offset(index as isize)
-    }*/
-
 
     fn close(&mut self) {
         self.file_descriptor.flush();
@@ -228,7 +215,6 @@ pub struct Table {
 impl Table {
 
     fn new(pager: Pager) -> Self {
-        let file_length = pager.file_length();
         Table {
             pager,
             root_page_num: 0
@@ -284,13 +270,7 @@ impl <'a> Cursor<'a> {
         }
     }
 
-    pub fn cursor_mut_value(&mut self) -> *mut Row{
-        let cell_num = self.cell_num;
-        let page = self.get_page();
-        page.leaf_node_value(cell_num)
-    }
-
-    pub fn cursor_value(&mut self) -> *const Row{
+    pub fn cursor_value(&mut self) -> Box<Row> {
         let cell_num = self.cell_num;
         let page = self.get_page();
         unsafe { page.row_mut_slot(cell_num) }
@@ -312,13 +292,20 @@ impl <'a> Cursor<'a> {
         (*num_cells) += 1;
         *(page.leaf_node_key(cell_num)) = key;
 
-        let row = page.leaf_node_value(cell_num);
-        (*row).id = value.id;
-        (*row).username = value.username.clone();
-        (*row).email = value.email.clone();
+        let cell = page.leaf_node_value(cell_num);
+
+        std::ptr::write(cell as *mut u32, value.id);
+        let mut buf = [0 as u8; USERNAME_SIZE];
+        for i in 0..value.username.len() {
+            buf[i] = value.username.as_bytes()[i];
+        }
+        std::ptr::write((cell as usize + USERNAME_OFFSET) as *mut [u8; USERNAME_SIZE], buf);
+        let mut buf = [0 as u8; EMAIL_SIZE];
+        for i in 0..value.email.len() {
+            buf[i] = value.email.as_bytes()[i];
+        }
+        std::ptr::write((cell as usize + EMAIL_OFFSET) as *mut [u8; EMAIL_SIZE], buf);
     }
-
-
 }
 
 const ID_SIZE: usize = std::mem::size_of::<u32>();
@@ -390,7 +377,7 @@ fn main() {
             .unwrap();
 
         let mut pager = Pager::new(file);
-        if pager.num_pages() == 0 {
+        if pager.num_pages == 0 {
             unsafe {
                 let root_node = pager.get_page(0);
                 root_node.initialize_leaf_node();
@@ -405,7 +392,7 @@ fn main() {
     }
 
     fn db_close(table: &mut Table) {
-        for i in 0..table.pager.num_pages() {
+        for i in 0..table.pager.num_pages {
             table.pager.pager_flush(i);
         }
     }
