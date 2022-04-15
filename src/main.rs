@@ -363,6 +363,10 @@ fn main() {
         if command.eq(".exit") {
             db_close(table);
             process::exit(0x0100);
+        } else if command.eq(".constants") {
+            println!("Constants:");
+            print_constants();
+            return MetaCommandResult::META_COMMAND_SUCCESS;
         }
         MetaCommandResult::META_COMMAND_UNRECOGNIZED_COMMAND
     }
@@ -475,6 +479,15 @@ fn main() {
             StatementType::STATEMENT_SELECT => execute_select(&stmt, table),
             _ => ExecuteResult::EXECUTE_FAIL
         }
+    }
+
+    fn print_constants() {
+        println!("ROW_SIZE: {}", ROW_SIZE);
+        println!("COMMON_NODE_HEADER_SIZE: {}", COMMON_NODE_HEADER_SIZE);
+        println!("LEAF_NODE_HEADER_SIZE: {}", LEAF_NODE_HEADER_SIZE);
+        println!("LEAF_NODE_CELL_SIZE: {}", LEAF_NODE_CELL_SIZE);
+        println!("LEAF_NODE_SPACE_FOR_CELLS: {}", LEAF_NODE_SPACE_FOR_CELLS);
+        println!("LEAF_NODE_MAX_CELLS: {}", LEAF_NODE_MAX_CELLS);
     }
 
     let args: Vec<String> = env::args().collect();
