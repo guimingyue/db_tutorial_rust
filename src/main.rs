@@ -110,8 +110,8 @@ impl Page {
         }
     }
 
-    fn leaf_node_cell(&self, cell_num: usize) -> *const usize {
-        (self.index(LEAF_NODE_HEADER_SIZE + cell_num * LEAF_NODE_CELL_SIZE)) as *const usize
+    fn leaf_node_cell(&self, cell_num: usize) -> *const u8 {
+        (self.index(LEAF_NODE_HEADER_SIZE + cell_num * LEAF_NODE_CELL_SIZE)) as *const u8
     }
 
     fn leaf_node_key(&self, cell_num: usize) -> *mut u32 {
@@ -182,6 +182,7 @@ impl Pager {
                 }
             }
             self.pages[page_num] = Some(Box::new(new_page));
+            // TODO
             if page_num >= self.num_pages {
                 self.num_pages += 1;
             }
@@ -282,29 +283,31 @@ impl <'a> Cursor<'a> {
         let num_cells = page.leaf_node_num_cells();
         if *num_cells > LEAF_NODE_MAX_CELLS {
             println!("Need to implement splitting a leaf node.");
-            // TODO
             process::exit(-1);
         }
         if cell_num < *num_cells {
             // shift cell from cell_num to num_cells to right to make room for new cell
-            // TODO
+            for i in (cell_num + 1..=*num_cells).rev() {
+                std::ptr::copy_nonoverlapping(page.leaf_node_cell(i),
+                                              page.leaf_node_cell(i - 1) as *mut u8,
+                                              LEAF_NODE_CELL_SIZE);
+            }
         }
         (*num_cells) += 1;
         *(page.leaf_node_key(cell_num)) = key;
 
         let cell = page.leaf_node_value(cell_num);
+        self.serialize_row(cell, value);
+    }
 
-        std::ptr::write(cell as *mut u32, value.id);
-        let mut buf = [0 as u8; USERNAME_SIZE];
-        for i in 0..value.username.len() {
-            buf[i] = value.username.as_bytes()[i];
-        }
-        std::ptr::write((cell as usize + USERNAME_OFFSET) as *mut [u8; USERNAME_SIZE], buf);
-        let mut buf = [0 as u8; EMAIL_SIZE];
-        for i in 0..value.email.len() {
-            buf[i] = value.email.as_bytes()[i];
-        }
-        std::ptr::write((cell as usize + EMAIL_OFFSET) as *mut [u8; EMAIL_SIZE], buf);
+    unsafe fn serialize_row(&self, cell: *mut u8, source: &Row) {
+        std::ptr::write(cell as *mut u32, source.id);
+
+        std::ptr::write((cell as usize + USERNAME_OFFSET) as *mut [u8; USERNAME_SIZE], [0 as u8; USERNAME_SIZE]);
+        std::ptr::copy(source.username.as_ptr(), (cell as usize + USERNAME_OFFSET) as *mut u8, source.username.len());
+
+        std::ptr::write((cell as usize + EMAIL_OFFSET) as *mut [u8; EMAIL_SIZE], [0 as u8; EMAIL_SIZE]);
+        std::ptr::copy(source.email.as_ptr(), (cell as usize + EMAIL_OFFSET) as *mut u8, source.email.len());
     }
 }
 
