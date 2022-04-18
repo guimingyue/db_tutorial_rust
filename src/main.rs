@@ -143,6 +143,7 @@ impl Page {
 
     fn initialize_leaf_node(&mut self) {
         let ptr = self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize;
+        self.set_node_type(NODE_LEAF);
         unsafe {
             *ptr = 0;
         }
@@ -159,6 +160,13 @@ impl Page {
 
     fn get_node_type<'a>(&self) -> &'a NodeType {
         unsafe { &*(self.index(NODE_TYPE_OFFSET) as *const NodeType) }
+    }
+
+    fn set_node_type(&mut self, node_type: NodeType) {
+        let ptr = self.index(NODE_TYPE_OFFSET) as *mut u8;
+        unsafe {
+            *ptr = node_type as u8;
+        }
     }
 }
 
@@ -186,12 +194,15 @@ impl Pager {
         }
     }
 
-    fn get_page_view<'a>(&'a self, page_num: usize) -> Option<&Page> {
+    fn get_page_view(&self, page_num: usize) -> Option<&Page> {
         if page_num > TABLE_MAX_PAGES {
             panic!("Tried to fetch page number out of bounds. {} > {}", page_num, TABLE_MAX_PAGES);
         }
-        let page = &self.pages[page_num];;
-        Some(page.unwrap().as_ref())
+
+        match &self.pages[page_num] {
+            Some(page) => Some(page.as_ref()),
+            _ => None
+        }
     }
 
     fn get_page(&mut self, page_num: usize) -> &mut Page {
@@ -290,7 +301,7 @@ impl <'a> Cursor<'a> {
     pub fn table_start(table: &'a mut Table) -> Self {
         let root_page_num = table.root_page_num;
 
-        let root_node = table.pager.get_page_view(root_page_num).unwrap();
+        let root_node = table.pager.get_page(root_page_num);
         let num_cells = root_node.leaf_node_num_cells();
 
         Cursor {
@@ -334,8 +345,8 @@ impl <'a> Cursor<'a> {
         if cell_num < num_cells {
             // shift cell from cell_num to num_cells to right to make room for new cell
             for i in (cell_num + 1..=num_cells).rev() {
-                std::ptr::copy_nonoverlapping(page.leaf_node_cell(i),
-                                              page.leaf_node_cell(i - 1) as *mut u8,
+                std::ptr::copy_nonoverlapping(page.leaf_node_cell(i - 1),
+                                              page.leaf_node_cell(i) as *mut u8,
                                               LEAF_NODE_CELL_SIZE);
             }
         }
@@ -502,13 +513,11 @@ fn main() {
                     }
                 }
                 let (page_num, cell_num) = table.find(row_to_insert.id);
-                {
-                    let page = table.pager.get_page(page_num);
-                    if cell_num < page.leaf_node_num_cells() {
-                        let key_at_index = page.leaf_node_key(cell_num);
-                        if key_at_index == row_to_insert.id {
-                            return EXECUTE_DUPLICATE_KEY
-                        }
+                let page = table.pager.get_page(page_num);
+                if cell_num < page.leaf_node_num_cells() {
+                    let key_at_index = page.leaf_node_key(cell_num);
+                    if key_at_index == row_to_insert.id {
+                        return EXECUTE_DUPLICATE_KEY
                     }
                 }
                 let mut cursor = Cursor {
