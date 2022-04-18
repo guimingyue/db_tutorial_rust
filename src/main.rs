@@ -339,8 +339,8 @@ impl <'a> Cursor<'a> {
         let page = self.get_page();
         let num_cells = page.leaf_node_num_cells();
         if num_cells > LEAF_NODE_MAX_CELLS {
-            println!("Need to implement splitting a leaf node.");
-            process::exit(-1);
+            self.leaf_node_split_and_insert(value.id, value);
+            return;
         }
         if cell_num < num_cells {
             // shift cell from cell_num to num_cells to right to make room for new cell
@@ -355,6 +355,13 @@ impl <'a> Cursor<'a> {
 
         let cell = page.leaf_node_value(cell_num);
         self.serialize_row(cell, value);
+    }
+
+    fn leaf_node_split_and_insert(&mut self, key: u32, value: &Row) {
+        // Create a new node and move half the cells over.
+        // Insert the new value in one of the two nodes.
+        // Update parent or create a new parent.
+        let page = self.get_page();
     }
 
     unsafe fn serialize_row(&self, cell: *mut u8, source: &Row) {
@@ -506,12 +513,6 @@ fn main() {
     fn execute_insert(statement: &Statement, table: &mut Table) -> ExecuteResult {
         match statement.row_to_insert.as_ref() {
             Some(row_to_insert) => {
-                {
-                    let page = table.pager.get_page(table.root_page_num);
-                    if page.is_full() {
-                        return EXECUTE_TABLE_FULL;
-                    }
-                }
                 let (page_num, cell_num) = table.find(row_to_insert.id);
                 let page = table.pager.get_page(page_num);
                 if cell_num < page.leaf_node_num_cells() {
