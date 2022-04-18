@@ -11,5 +11,6 @@ A Rust version of sqlite db implementation followed by the tutorial of [cstack/d
 |Part 6|Part 6 - The Cursor Abstraction|[part_6](https://github.com/guimingyue/db_tutorial_rust/tree/part_6)|Done|
 |Part 7|Part 7 - Introduction to the B-Tree|||
 |Part 8|Part 8 - B-Tree Leaf Node Format|[part_8](https://github.com/guimingyue/db_tutorial_rust/tree/part_8)|Done|
-|Part 9|Part 9 - Binary Search and Duplicate Keys|[part_9](https://github.com/guimingyue/db_tutorial_rust/tree/part_9)|WIP|
+|Part 9|Part 9 - Binary Search and Duplicate Keys|[part_9](https://github.com/guimingyue/db_tutorial_rust/tree/part_9)|Done|
+|Part 10|Part 10 - Splitting a Leaf Node|[part_10](https://github.com/guimingyue/db_tutorial_rust/tree/part_10)|WIP|
 
