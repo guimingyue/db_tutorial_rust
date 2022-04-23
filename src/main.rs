@@ -143,8 +143,9 @@ impl Page {
     }
 
     fn initialize_leaf_node(&mut self) {
-        let ptr = self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize;
         self.set_node_type(NODE_LEAF);
+        self.set_node_root(false);
+        let ptr = self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize;
         unsafe {
             *ptr = 0;
         }
@@ -152,8 +153,8 @@ impl Page {
 
     fn initialize_internal_node(&mut self) {
         self.set_node_type(NODE_INTERNAL);
+        self.set_node_root(false);
         let ptr = self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize;
-
         unsafe {
             *ptr = 0;
         }
@@ -189,9 +190,19 @@ impl Page {
         }
     }
 
+    fn internal_node_right_child(&self) -> isize {
+        self.index(INTERNAL_NODE_RIGHT_CHILD_OFFSET)
+    }
+
     pub fn set_internal_node_right_child(&mut self, internal_node_right_child: usize) {
         unsafe {
-            *(self.index(INTERNAL_NODE_RIGHT_CHILD_OFFSET) as *mut usize) = internal_node_right_child;
+            *(self.internal_node_right_child() as *mut usize) = internal_node_right_child;
+        }
+    }
+
+    pub fn get_internal_node_right_child(&self) -> usize {
+        unsafe {
+            *(self.internal_node_right_child() as *mut usize)
         }
     }
 
@@ -207,12 +218,16 @@ impl Page {
         }
     }
 
-    pub fn internal_node_cell(&mut self, cell_num: usize) -> isize {
+    pub fn internal_node_cell(&self, cell_num: usize) -> isize {
         self.index(INTERNAL_NODE_HEADER_SIZE + cell_num * INTERNAL_NODE_CELL_SIZE)
     }
 
     fn set_internal_node_cell(&mut self, cell_num: usize, page_num: usize) {
         unsafe { *(self.internal_node_cell(cell_num) as *mut usize) = page_num }
+    }
+
+    fn get_internal_node_cell(&self, cell_num: usize) -> usize {
+        unsafe { *(self.internal_node_cell(cell_num) as *const usize) }
     }
 
     pub fn set_internal_node_child(&mut self, child_num: usize, child_page_num: usize) {
@@ -224,6 +239,18 @@ impl Page {
             self.set_internal_node_right_child(child_page_num);
         } else {
             self.set_internal_node_cell(child_num, child_page_num);
+        }
+    }
+
+    pub fn get_internal_node_child(&self, child_num: usize) -> usize {
+        let num_keys = self.get_internal_node_num_keys();
+        if child_num > num_keys {
+            println!("Tried to access child_num {}", child_num);
+            process::exit(0x0010);
+        } else if child_num == num_keys {
+            self.get_internal_node_right_child()
+        } else {
+            self.get_internal_node_cell(child_num)
         }
     }
 
@@ -368,6 +395,47 @@ impl Table {
             process::exit(0x0010);
         }
     }
+
+    pub fn print_tree(&self) {
+        fn print_tree_node(pager: &Pager, page_num: usize, indentation_level: usize) {
+            fn indent(level: usize) {
+                (0..level).for_each(|i| print!(" "));
+            }
+            let node = pager.get_page_view(page_num);
+            match node {
+                Some(page) => {
+                    match page.get_node_type() {
+                        NodeType::NODE_LEAF => {
+                            let num_keys = page.leaf_node_num_cells();
+                            indent(indentation_level);
+                            println!("- leaf (size {})", num_keys);
+                            for i in 0..num_keys {
+                                indent(indentation_level + 1);
+                                println!("{}", page.leaf_node_key(i));
+                            }
+                        },
+                        NodeType::NODE_INTERNAL => {
+                            let num_keys = page.get_internal_node_num_keys();
+                            indent(indentation_level);
+                            println!("- internal (size {})", num_keys);
+                            for i in 0..num_keys {
+                                let child = page.get_internal_node_child(i);
+                                print_tree_node(pager, child, indentation_level + 1);
+                                indent(indentation_level + 1);
+                                println!("- key {}", page.get_internal_node_key(i));
+                            }
+                            let child = page.get_internal_node_right_child();
+                            print_tree_node(pager, child, indentation_level + 1);
+                        }
+                    }
+                },
+                _ => ()
+            }
+
+        };
+
+        print_tree_node(&self.pager, 0, 0);
+    }
 }
 
 pub struct Cursor<'a> {
@@ -419,7 +487,7 @@ impl <'a> Cursor<'a> {
         let cell_num = self.cell_num;
         let page = self.get_page();
         let num_cells = page.leaf_node_num_cells();
-        if num_cells > LEAF_NODE_MAX_CELLS {
+        if num_cells >= LEAF_NODE_MAX_CELLS {
             self.leaf_node_split_and_insert(value.id, value);
             return;
         }
@@ -458,7 +526,7 @@ impl <'a> Cursor<'a> {
             let old_node_ptr = old_node as *const Page;
             let new_node = self.table.pager.get_page(new_page_num);
             // init and copy cells to new right node from old node
-            new_node.initialize_internal_node();
+            new_node.initialize_leaf_node();
             copy_page_data((LEAF_NODE_LEFT_SPLIT_COUNT..LEAF_NODE_MAX_CELLS + 1).rev(), old_node_ptr, new_node, value, value_cell_num);
             new_node.set_leaf_node_num_cells(LEAF_NODE_RIGHT_SPLIT_COUNT);
         }
@@ -608,6 +676,10 @@ fn main() {
             println!("Constants:");
             print_constants();
             return MetaCommandResult::META_COMMAND_SUCCESS;
+        } else if command.eq(".btree") {
+            println!("Btree:");
+            table.print_tree();
+            return MetaCommandResult::META_COMMAND_SUCCESS;
         }
         MetaCommandResult::META_COMMAND_UNRECOGNIZED_COMMAND
     }
@@ -626,6 +698,7 @@ fn main() {
             unsafe {
                 let root_node = pager.get_page(0);
                 root_node.initialize_leaf_node();
+                root_node.set_node_root(true);
             }
         }
         pager
