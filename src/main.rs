@@ -565,7 +565,7 @@ const LEAF_NODE_HEADER_SIZE: usize = COMMON_NODE_HEADER_SIZE + LEAF_NODE_NUM_CEL
 
 /// Leaf Node Body Layout:
 /// [Leaf Node Key|Leaf Node Value]
-const LEAF_NODE_KEY_SIZE: usize = std::mem::size_of::<usize>();
+const LEAF_NODE_KEY_SIZE: usize = std::mem::size_of::<u32>();
 const LEAF_NODE_KEY_OFFSET: usize = 0;
 const LEAF_NODE_VALUE_SIZE: usize = ROW_SIZE;
 const LEAF_NODE_VALUE_OFFSET: usize = LEAF_NODE_KEY_OFFSET + LEAF_NODE_KEY_SIZE;
@@ -732,10 +732,16 @@ fn main() {
     fn print_constants() {
         println!("ROW_SIZE: {}", ROW_SIZE);
         println!("COMMON_NODE_HEADER_SIZE: {}", COMMON_NODE_HEADER_SIZE);
+        println!();
         println!("LEAF_NODE_HEADER_SIZE: {}", LEAF_NODE_HEADER_SIZE);
         println!("LEAF_NODE_CELL_SIZE: {}", LEAF_NODE_CELL_SIZE);
         println!("LEAF_NODE_SPACE_FOR_CELLS: {}", LEAF_NODE_SPACE_FOR_CELLS);
         println!("LEAF_NODE_MAX_CELLS: {}", LEAF_NODE_MAX_CELLS);
+        println!();
+        println!("INTERNAL_NODE_HEADER_SIZE: {}", INTERNAL_NODE_HEADER_SIZE);
+        println!("INTERNAL_NODE_KEY_SIZE: {}", INTERNAL_NODE_KEY_SIZE);
+        println!("INTERNAL_NODE_CHILD_SIZE: {}", INTERNAL_NODE_CHILD_SIZE);
+        println!("INTERNAL_NODE_CELL_SIZE: {}", INTERNAL_NODE_CELL_SIZE);
     }
 
     let args: Vec<String> = env::args().collect();
