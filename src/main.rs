@@ -828,16 +828,9 @@ fn main() {
         process::exit(0x0100);
     }
     let mut table = db_open(args[1].as_str());
-    let mut i = 1;
     loop {
         print_prompt();
-        let command;
-        if i <= 13 {
-            command = format!("insert {} user{} person{}@example.com", i, i, i);
-            i += 1;
-        } else {
-            command = read_input();
-        }
+        let command= read_input();
         if command.starts_with(".") {
             let meta_result = do_meta_command(&command, &mut table);
             match meta_result {
