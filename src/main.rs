@@ -376,28 +376,55 @@ impl Table {
         if page.is_none() {
             return (0, 0);
         }
-        let page = page.unwrap();
+        self.find_by_page(page.unwrap(), key, root_page_num)
+    }
 
-        if *page.get_node_type() == NODE_LEAF {
-            let num_cells = page.leaf_node_num_cells();
-            let (mut min_index, mut one_past_max_index) = (0, num_cells);
-            while one_past_max_index != min_index {
-                let index = (one_past_max_index + min_index) / 2;
-                let key_at_index = page.leaf_node_key(index);
-                if key_at_index == key {
-                    // return
-                    return (root_page_num, index)
-                } else if key_at_index > key {
-                    one_past_max_index = index;
-                } else {
-                    min_index = index + 1;
-                }
-            }
-            (root_page_num, min_index)
-        } else {
-            println!("Need to implement searching an internal node");
+    fn find_by_page_num(&self, page_num: usize, key: u32) -> (usize, usize) {
+        let page = self.pager.get_page_view(page_num);
+        if page.is_none() {
+            println!("page {} not exist", page_num);
             process::exit(0x0010);
         }
+        self.find_by_page(page.unwrap(), key, page_num)
+    }
+
+    fn find_by_page(&self, page: &Page, key: u32, page_num: usize) -> (usize, usize) {
+        if *page.get_node_type() == NODE_LEAF {
+            self.leaf_node_find(page, key, page_num)
+        } else {
+            self.internal_node_find(page, key)
+        }
+    }
+
+    fn internal_node_find(&self, page: &Page, key: u32) -> (usize, usize) {
+        let num_keys = page.get_internal_node_num_keys();
+        for cell_num in 0..num_keys {
+            let cell_key_value = page.get_internal_node_key(cell_num);
+            if cell_key_value > key {
+                let child_page_num = page.get_internal_node_child(cell_num);
+                return self.find_by_page_num(child_page_num, key);
+            }
+        }
+        let right_child_num = page.get_internal_node_right_child();
+        self.find_by_page_num(right_child_num, key)
+    }
+
+    fn leaf_node_find(&self, page: &Page, key: u32, page_num: usize) -> (usize, usize) {
+        let num_cells = page.leaf_node_num_cells();
+        let (mut min_index, mut one_past_max_index) = (0, num_cells);
+        while one_past_max_index != min_index {
+            let index = (one_past_max_index + min_index) / 2;
+            let key_at_index = page.leaf_node_key(index);
+            if key_at_index == key {
+                // return
+                return (page_num, index);
+            } else if key_at_index > key {
+                one_past_max_index = index;
+            } else {
+                min_index = index + 1;
+            }
+        }
+        (page_num, min_index)
     }
 
     pub fn print_tree(&self) {
@@ -828,9 +855,16 @@ fn main() {
         process::exit(0x0100);
     }
     let mut table = db_open(args[1].as_str());
+    let mut i = 1;
     loop {
         print_prompt();
-        let command= read_input();
+        let command;
+        if i <= 13 {
+            command = format!("insert {} user{} person{}@example.com", i, i, i);
+            i += 1;
+        } else {
+            command = read_input();
+        }
         if command.starts_with(".") {
             let meta_result = do_meta_command(&command, &mut table);
             match meta_result {
