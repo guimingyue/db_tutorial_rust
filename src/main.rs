@@ -154,7 +154,7 @@ impl Page {
     fn initialize_internal_node(&mut self) {
         self.set_node_type(NODE_INTERNAL);
         self.set_node_root(false);
-        let ptr = self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize;
+        let ptr = self.index(INTERNAL_NODE_NUM_KEYS_OFFSET) as *mut usize;
         unsafe {
             *ptr = 0;
         }
@@ -262,7 +262,7 @@ impl Page {
 
     fn get_internal_node_key(&self, cell_num: usize) -> u32 {
         unsafe {
-            *(self.index(INTERNAL_NODE_NUM_KEYS_OFFSET + cell_num * INTERNAL_NODE_CELL_SIZE) as *const u32)
+            *((self.internal_node_cell(cell_num) + INTERNAL_NODE_CHILD_SIZE as isize) as *const u32)
         }
     }
 
@@ -372,7 +372,11 @@ impl Table {
 
     fn find(&self, key: u32) -> (usize, usize) {
         let root_page_num = self.root_page_num;
-        let page = self.pager.get_page_view(root_page_num).unwrap();
+        let page = self.pager.get_page_view(root_page_num);
+        if page.is_none() {
+            return (0, 0);
+        }
+        let page = page.unwrap();
 
         if *page.get_node_type() == NODE_LEAF {
             let num_cells = page.leaf_node_num_cells();
@@ -765,6 +769,7 @@ fn main() {
                 if cell_num < page.leaf_node_num_cells() {
                     let key_at_index = page.leaf_node_key(cell_num);
                     if key_at_index == row_to_insert.id {
+                        // TODO
                         return EXECUTE_DUPLICATE_KEY
                     }
                 }
@@ -823,9 +828,16 @@ fn main() {
         process::exit(0x0100);
     }
     let mut table = db_open(args[1].as_str());
+    let mut i = 1;
     loop {
         print_prompt();
-        let command = read_input();
+        let command;
+        if i <= 13 {
+            command = format!("insert {} user{} person{}@example.com", i, i, i);
+            i += 1;
+        } else {
+            command = read_input();
+        }
         if command.starts_with(".") {
             let meta_result = do_meta_command(&command, &mut table);
             match meta_result {
