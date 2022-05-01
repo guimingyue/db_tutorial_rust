@@ -1,10 +1,10 @@
 use std::fs::{File, OpenOptions};
 use std::{env, io};
+use std::cell::RefCell;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter::Rev;
 use std::ops::Range;
 use std::process;
-use std::thread::current;
 use crate::ExecuteResult::{EXECUTE_DUPLICATE_KEY, EXECUTE_FAIL, EXECUTE_SUCCESS, EXECUTE_TABLE_FULL};
 use crate::NodeType::{NODE_INTERNAL, NODE_LEAF};
 use crate::PrepareResult::{PREPARE_NEGATIVE_ID, PREPARE_STRING_TOO_LONG, PREPARE_SUCCESS, PREPARE_SYNTAX_ERROR, PREPARE_UNRECOGNIZED_STATEMENT};
@@ -165,8 +165,7 @@ impl Page {
     }
 
     fn is_leaf_node(&self) -> bool {
-        // TODO
-        true
+        *(self.get_node_type()) == NodeType::NODE_LEAF
     }
 
     fn get_node_type<'a>(&self) -> &'a NodeType {
@@ -275,7 +274,7 @@ impl Page {
 }
 
 pub struct Pager {
-    file_descriptor: File,
+    file_descriptor: RefCell<File>,
     pages: Vec<Option<Box<Page>>>,
     num_pages: usize
 }
@@ -293,7 +292,7 @@ impl Pager {
         }
         Pager {
             num_pages: num_pages_file(file.metadata().unwrap().len()),
-            file_descriptor: file,
+            file_descriptor: RefCell::new(file),
             pages: std::iter::repeat_with(|| None).take(TABLE_MAX_PAGES).collect::<Vec<_>>()
         }
     }
@@ -303,9 +302,33 @@ impl Pager {
             panic!("Tried to fetch page number out of bounds. {} > {}", page_num, TABLE_MAX_PAGES);
         }
 
-        match &self.pages[page_num] {
-            Some(page) => Some(page.as_ref()),
-            _ => None
+        unsafe {
+            let ptr = self.pages.as_ptr();
+            let page = ptr.offset(page_num as isize);
+            if (*page).is_none() {
+                self.load_page(page_num);
+            }
+            let page = ptr.offset(page_num as isize);
+            Some((*page).as_ref().unwrap().as_ref())
+        }
+    }
+
+    fn load_page(&self, page_num: usize) {
+        // create a page in memory
+        let mut new_page = Page::new();
+        if page_num <= self.num_pages {
+            self.file_descriptor.borrow_mut().seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
+            let result = self.file_descriptor.borrow_mut().read(&mut new_page.buf);
+            if result.is_err() {
+                println!("Error reading file: {}", result.unwrap());
+                process::exit(0x0100);
+            }
+        }
+
+        unsafe {
+            let ptr = self.pages.as_ptr();
+            let pages = ptr as *mut Option<Box<Page>>;
+            (*pages.offset(page_num as isize)) = Some(Box::new(new_page));
         }
     }
 
@@ -313,34 +336,30 @@ impl Pager {
         if page_num > TABLE_MAX_PAGES {
             panic!("Tried to fetch page number out of bounds. {} > {}", page_num, TABLE_MAX_PAGES);
         }
-        let page = &self.pages[page_num];
-        if page.is_none() {
-            // create a page in memory
-            let mut new_page = Page::new();
-            if page_num <= self.num_pages {
-                self.file_descriptor.seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
-                let result = self.file_descriptor.read(&mut new_page.buf);
-                if result.is_err() {
-                    println!("Error reading file: {}", result.unwrap());
-                    process::exit(0x0100);
+        unsafe {
+            let ptr = self.pages.as_ptr();
+            let page = ptr.offset(page_num as isize);
+            if (*page).is_none() {
+                self.load_page(page_num);
+                // TODO
+                if page_num >= self.num_pages {
+                    self.num_pages += 1;
                 }
             }
-            self.pages[page_num] = Some(Box::new(new_page));
-            // TODO
-            if page_num >= self.num_pages {
-                self.num_pages += 1;
-            }
         }
-        let page = &mut self.pages[page_num];
-        page.as_mut().unwrap()
+        let pages = self.pages.as_mut_ptr();
+        unsafe {
+            let page = pages.offset(page_num as isize);
+            (*page).as_mut().unwrap().as_mut()
+        }
     }
 
     pub fn pager_flush(&mut self, page_num: usize) {
         match &self.pages[page_num] {
             Some(page) => {
-                self.file_descriptor.seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
-                self.file_descriptor.write(page.buf.as_slice());
-                self.file_descriptor.flush();
+                self.file_descriptor.borrow_mut().seek(SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64));
+                self.file_descriptor.borrow_mut().write(page.buf.as_slice());
+                self.file_descriptor.borrow_mut().flush();
             },
             None => ()
 
@@ -348,7 +367,7 @@ impl Pager {
     }
 
     fn close(&mut self) {
-        self.file_descriptor.flush();
+        self.file_descriptor.borrow_mut().flush();
     }
 
     fn get_unused_page_num(&self) -> usize {
@@ -398,15 +417,33 @@ impl Table {
 
     fn internal_node_find(&self, page: &Page, key: u32) -> (usize, usize) {
         let num_keys = page.get_internal_node_num_keys();
+        // binary search
+        let (mut min_cell, mut max_cell) = (0, num_keys - 1);
+        while min_cell < max_cell {
+            let cell_num = (max_cell - min_cell) / 2 + min_cell;
+            let cell_key_value = page.get_internal_node_key(cell_num);
+            if cell_key_value >= key {
+                max_cell = cell_num;
+            } else {
+                min_cell = cell_num + 1;
+            }
+        }
+        if page.get_internal_node_key(max_cell) >= key {
+            let child_page_num = page.get_internal_node_child(max_cell);
+            return self.find_by_page_num(child_page_num, key);
+        }
+        let right_child_num = page.get_internal_node_right_child();
+        self.find_by_page_num(right_child_num, key)
+/*
         for cell_num in 0..num_keys {
             let cell_key_value = page.get_internal_node_key(cell_num);
-            if cell_key_value > key {
+            if cell_key_value >= key {
                 let child_page_num = page.get_internal_node_child(cell_num);
                 return self.find_by_page_num(child_page_num, key);
             }
         }
         let right_child_num = page.get_internal_node_right_child();
-        self.find_by_page_num(right_child_num, key)
+        self.find_by_page_num(right_child_num, key)*/
     }
 
     fn leaf_node_find(&self, page: &Page, key: u32, page_num: usize) -> (usize, usize) {
@@ -855,16 +892,9 @@ fn main() {
         process::exit(0x0100);
     }
     let mut table = db_open(args[1].as_str());
-    let mut i = 1;
     loop {
         print_prompt();
-        let command;
-        if i <= 13 {
-            command = format!("insert {} user{} person{}@example.com", i, i, i);
-            i += 1;
-        } else {
-            command = read_input();
-        }
+        let command = read_input();
         if command.starts_with(".") {
             let meta_result = do_meta_command(&command, &mut table);
             match meta_result {
