@@ -145,6 +145,7 @@ impl Page {
     fn initialize_leaf_node(&mut self) {
         self.set_node_type(NODE_LEAF);
         self.set_node_root(false);
+        self.set_leaf_node_next_leaf(0);
         let ptr = self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize;
         unsafe {
             *ptr = 0;
@@ -271,6 +272,18 @@ impl Page {
             NODE_LEAF => self.leaf_node_key(self.leaf_node_num_cells() - 1)
         }
     }
+
+    pub fn get_leaf_node_next_leaf(&self) -> usize {
+        unsafe {
+            *(self.index(LEAF_NODE_NEXT_LEAF_OFFSET) as *const usize)
+        }
+    }
+
+    pub fn set_leaf_node_next_leaf(&self, next_leaf: usize) {
+        unsafe {
+            *(self.index(LEAF_NODE_NEXT_LEAF_OFFSET) as *mut usize) = next_leaf;
+        }
+    }
 }
 
 pub struct Pager {
@@ -352,6 +365,23 @@ impl Pager {
             let page = pages.offset(page_num as isize);
             (*page).as_mut().unwrap().as_mut()
         }
+    }
+
+    /// Find the leftmost leaf page number.
+    /// This implementation is different from the origin of the tutorial in which the implementation
+    /// of finding the leftmost leaf page by finding the page of the lowest key residing. For example,
+    /// by finding the key 0, and then return the page key 0 should be inserted.
+    pub fn get_leftmost_leaf_page_num(&self, page_num: usize) -> usize {
+        let page = self.get_page_view(page_num);
+        if page.is_none() {
+            panic!("invalid page number {}", page_num);
+        }
+        let p = page.unwrap();
+        if p.is_leaf_node() {
+            return page_num;
+        }
+        let child_page_num = p.get_internal_node_child(0);
+        return self.get_leftmost_leaf_page_num(child_page_num);
     }
 
     pub fn pager_flush(&mut self, page_num: usize) {
@@ -518,13 +548,14 @@ impl <'a> Cursor<'a> {
     pub fn table_start(table: &'a mut Table) -> Self {
         let root_page_num = table.root_page_num;
 
-        let root_node = table.pager.get_page(root_page_num);
-        let num_cells = root_node.leaf_node_num_cells();
+        let leaf_page_num = table.pager.get_leftmost_leaf_page_num(root_page_num);
+        let leaf_node = table.pager.get_page_view(leaf_page_num).unwrap();
+        let num_cells = leaf_node.leaf_node_num_cells();
 
         Cursor {
             table,
             cell_num: 0,
-            page_num: root_page_num,
+            page_num: leaf_page_num,
             end_of_table: num_cells == 0
         }
     }
@@ -541,7 +572,15 @@ impl <'a> Cursor<'a> {
         let page = self.table.pager.get_page_view(self.page_num).unwrap();
         self.cell_num += 1;
         if self.cell_num >= page.leaf_node_num_cells() {
-            self.end_of_table = true;
+            /* Advance to next leaf node */
+            let next_page_num = page.get_leaf_node_next_leaf();
+            if next_page_num == 0 {
+                /* This was rightmost leaf */
+                self.end_of_table = true;
+            } else {
+                self.page_num = next_page_num;
+                self.cell_num = 0;
+            }
         }
     }
 
@@ -591,11 +630,13 @@ impl <'a> Cursor<'a> {
         let new_page_num = self.table.pager.get_unused_page_num();
         {
             let old_node = self.get_page_view().unwrap();
+            let old_next_page_num = old_node.get_leaf_node_next_leaf();
             let old_node_ptr = old_node as *const Page;
             let new_node = self.table.pager.get_page(new_page_num);
             // init and copy cells to new right node from old node
             new_node.initialize_leaf_node();
-            copy_page_data((LEAF_NODE_LEFT_SPLIT_COUNT..LEAF_NODE_MAX_CELLS + 1).rev(), old_node_ptr, new_node, value, value_cell_num);
+            new_node.set_leaf_node_next_leaf(old_next_page_num);
+            copy_page_data((LEAF_NODE_LEFT_SPLIT_COUNT..LEAF_NODE_MAX_CELLS + 1).rev(), old_node_ptr, new_node, key, value, value_cell_num);
             new_node.set_leaf_node_num_cells(LEAF_NODE_RIGHT_SPLIT_COUNT);
         }
 
@@ -608,8 +649,9 @@ impl <'a> Cursor<'a> {
             // the old node. So the old node is [1, 2, 3] after inserting is finished.
             let old_node = self.get_page();
             is_node_root = old_node.is_node_root();
-            copy_page_data((0..LEAF_NODE_LEFT_SPLIT_COUNT).rev(), old_node as *const Page, old_node, value, value_cell_num);
+            copy_page_data((0..LEAF_NODE_LEFT_SPLIT_COUNT).rev(), old_node as *const Page, old_node, key, value, value_cell_num);
             old_node.set_leaf_node_num_cells(LEAF_NODE_LEFT_SPLIT_COUNT);
+            old_node.set_leaf_node_next_leaf(new_page_num);
         }
 
         if is_node_root {
@@ -655,12 +697,14 @@ unsafe fn serialize_row(cell: *mut u8, source: &Row) {
     std::ptr::copy(source.email.as_ptr(), (cell as usize + EMAIL_OFFSET) as *mut u8, source.email.len());
 }
 
-fn copy_page_data(rang: Rev<Range<usize>>, src_ptr: *const Page, dst_page: &mut Page, value: &Row, value_cell_num: usize) {
+fn copy_page_data(rang: Rev<Range<usize>>, src_ptr: *const Page, dst_page: &mut Page, key: u32, value: &Row, value_cell_num: usize) {
     for i in rang {
         let index_within_node = i % LEAF_NODE_LEFT_SPLIT_COUNT;
         let destination = dst_page.leaf_node_cell(index_within_node);
         unsafe {
             if i == value_cell_num {
+                dst_page.set_leaf_node_key(index_within_node, key);
+                let destination = dst_page.leaf_node_value(index_within_node);
                 serialize_row(destination as *mut u8, value);
             } else if i > value_cell_num {
                 std::ptr::copy((*src_ptr).leaf_node_cell(i - 1), destination as *mut u8, LEAF_NODE_CELL_SIZE);
@@ -697,7 +741,9 @@ const COMMON_NODE_HEADER_SIZE: usize = NODE_TYPE_SIZE + IS_ROOT_SIZE + PARENT_PO
 /// Common Node Header|Cell num of Leaf Node
 const LEAF_NODE_NUM_CELLS_SIZE: usize = std::mem::size_of::<usize>();
 const LEAF_NODE_NUM_CELLS_OFFSET: usize = COMMON_NODE_HEADER_SIZE;
-const LEAF_NODE_HEADER_SIZE: usize = COMMON_NODE_HEADER_SIZE + LEAF_NODE_NUM_CELLS_SIZE;
+const LEAF_NODE_NEXT_LEAF_SIZE: usize = std::mem::size_of::<usize>();
+const LEAF_NODE_NEXT_LEAF_OFFSET: usize = LEAF_NODE_NUM_CELLS_OFFSET + LEAF_NODE_NUM_CELLS_SIZE;
+const LEAF_NODE_HEADER_SIZE: usize = COMMON_NODE_HEADER_SIZE + LEAF_NODE_NUM_CELLS_SIZE + LEAF_NODE_NEXT_LEAF_SIZE;
 
 /// Leaf Node Body Layout:
 /// [Leaf Node Key|Leaf Node Value]
