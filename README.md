@@ -15,4 +15,5 @@ A Rust version of sqlite db implementation followed by the tutorial of [cstack/d
 |Part 10|Part 10 - Splitting a Leaf Node|[part_10](https://github.com/guimingyue/db_tutorial_rust/tree/part_10)|Done|
 |Part 11|Part 11 - Recursively Searching the B-Tree|[part_11](https://github.com/guimingyue/db_tutorial_rust/tree/part_11)|Done|
 |Part 12|Part 12 - Scanning a Multi-Level B-Tree|[part_12](https://github.com/guimingyue/db_tutorial_rust/tree/part_12)|Done|
+|Part 13|Part 13 - Updating Parent Node After a Split|[part_13](https://github.com/guimingyue/db_tutorial_rust/tree/part_13)|Done|
 

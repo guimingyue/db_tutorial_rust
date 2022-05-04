@@ -214,8 +214,13 @@ impl Page {
 
     pub fn get_internal_node_num_keys(&self) -> usize {
         unsafe {
-            *(self.index(INTERNAL_NODE_NUM_KEYS_OFFSET) as *mut usize)
+            *(self.index(INTERNAL_NODE_NUM_KEYS_OFFSET) as *const usize)
         }
+    }
+
+    pub fn increase_internal_node_num_keys(&mut self, incr: usize) {
+        let origin_num_keys = self.get_internal_node_num_keys();
+        self.set_internal_node_num_keys(origin_num_keys + incr);
     }
 
     pub fn internal_node_cell(&self, cell_num: usize) -> isize {
@@ -283,6 +288,58 @@ impl Page {
         unsafe {
             *(self.index(LEAF_NODE_NEXT_LEAF_OFFSET) as *mut usize) = next_leaf;
         }
+    }
+
+    pub fn get_node_parent(&self) -> usize {
+        unsafe {
+            *(self.index(PARENT_POINTER_OFFSET) as *const usize)
+        }
+    }
+
+    pub fn set_node_parent(&self, parent_page_num: usize) {
+        unsafe {
+            *(self.index(PARENT_POINTER_OFFSET) as *mut usize) = parent_page_num;
+        }
+    }
+
+    pub fn update_internal_node_key(&mut self, old_key: u32, new_key: u32) {
+        let old_child_index = self.internal_node_find_child(old_key);
+        self.set_internal_node_key(old_child_index, new_key);
+    }
+
+    /// Return the index of the child which should contain the given key.
+    fn internal_node_find_child(&self, key: u32) -> usize {
+        let num_keys = self.get_internal_node_num_keys();
+        // binary search
+        let (mut min_cell, mut max_cell) = (0, num_keys);
+        while min_cell < max_cell {
+            let cell_num = (max_cell - min_cell) / 2 + min_cell;
+            let cell_key_value = self.get_internal_node_key(cell_num);
+            if cell_key_value >= key {
+                max_cell = cell_num;
+            } else {
+                min_cell = cell_num + 1;
+            }
+        }
+        max_cell
+    }
+
+    fn leaf_node_find(&self, key: u32) -> usize {
+        let num_cells = self.leaf_node_num_cells();
+        let (mut min_index, mut one_past_max_index) = (0, num_cells);
+        while one_past_max_index != min_index {
+            let index = (one_past_max_index + min_index) / 2;
+            let key_at_index = self.leaf_node_key(index);
+            if key_at_index == key {
+                // return
+                return index;
+            } else if key_at_index > key {
+                one_past_max_index = index;
+            } else {
+                min_index = index + 1;
+            }
+        }
+        min_index
     }
 }
 
@@ -354,7 +411,6 @@ impl Pager {
             let page = ptr.offset(page_num as isize);
             if (*page).is_none() {
                 self.load_page(page_num);
-                // TODO
                 if page_num >= self.num_pages {
                     self.num_pages += 1;
                 }
@@ -419,7 +475,10 @@ impl Table {
         }
     }
 
-    fn find(&self, key: u32) -> (usize, usize) {
+    /// Find the position of the key in the table from root page to leaf page according.
+    /// The position contains page number and cell number, if the key does not exist in any leaf
+    /// page, then the position the key could be inserted will be returned.
+    pub fn find(&self, key: u32) -> (usize, usize) {
         let root_page_num = self.root_page_num;
         let page = self.pager.get_page_view(root_page_num);
         if page.is_none() {
@@ -437,6 +496,8 @@ impl Table {
         self.find_by_page(page.unwrap(), key, page_num)
     }
 
+    /// Find the page number and cell number of the given key, the whole search process starts from
+    /// the root page, which can be an internal node or a leaf node.
     fn find_by_page(&self, page: &Page, key: u32, page_num: usize) -> (usize, usize) {
         if *page.get_node_type() == NODE_LEAF {
             self.leaf_node_find(page, key, page_num)
@@ -445,53 +506,71 @@ impl Table {
         }
     }
 
-    fn internal_node_find(&self, page: &Page, key: u32) -> (usize, usize) {
-        let num_keys = page.get_internal_node_num_keys();
-        // binary search
-        let (mut min_cell, mut max_cell) = (0, num_keys - 1);
-        while min_cell < max_cell {
-            let cell_num = (max_cell - min_cell) / 2 + min_cell;
-            let cell_key_value = page.get_internal_node_key(cell_num);
-            if cell_key_value >= key {
-                max_cell = cell_num;
-            } else {
-                min_cell = cell_num + 1;
-            }
-        }
-        if page.get_internal_node_key(max_cell) >= key {
-            let child_page_num = page.get_internal_node_child(max_cell);
+    pub fn internal_node_find(&self, page: &Page, key: u32) -> (usize, usize) {
+        let cell_index = page.internal_node_find_child(key);
+        if page.get_internal_node_key(cell_index) >= key {
+            let child_page_num = page.get_internal_node_child(cell_index);
             return self.find_by_page_num(child_page_num, key);
         }
         let right_child_num = page.get_internal_node_right_child();
         self.find_by_page_num(right_child_num, key)
-/*
-        for cell_num in 0..num_keys {
-            let cell_key_value = page.get_internal_node_key(cell_num);
-            if cell_key_value >= key {
-                let child_page_num = page.get_internal_node_child(cell_num);
-                return self.find_by_page_num(child_page_num, key);
-            }
-        }
-        let right_child_num = page.get_internal_node_right_child();
-        self.find_by_page_num(right_child_num, key)*/
     }
 
+    /// Binary searches this leaf node(page) for the given key.
+    ///
+    /// If the value is found, then the page number and cell number are returned, if the given key
+    /// is not found, then the position the key could be inserted is returned.
     fn leaf_node_find(&self, page: &Page, key: u32, page_num: usize) -> (usize, usize) {
-        let num_cells = page.leaf_node_num_cells();
-        let (mut min_index, mut one_past_max_index) = (0, num_cells);
-        while one_past_max_index != min_index {
-            let index = (one_past_max_index + min_index) / 2;
-            let key_at_index = page.leaf_node_key(index);
-            if key_at_index == key {
-                // return
-                return (page_num, index);
-            } else if key_at_index > key {
-                one_past_max_index = index;
-            } else {
-                min_index = index + 1;
-            }
+        (page_num, page.leaf_node_find(key))
+    }
+
+    /// Add a new child/key pair to parent that corresponds to child
+    pub fn internal_node_insert(&mut self, parent_page_num: usize, child_page_num: usize) {
+        let child_max_key;
+        {
+            let child = self.pager.get_page_view(child_page_num).unwrap();
+            child_max_key = child.get_node_max_key();
         }
-        (page_num, min_index)
+
+        let right_child_page_num;
+        let child_max_key_index;
+        let origin_num_keys;
+        {
+            let parent = self.pager.get_page(parent_page_num);
+            right_child_page_num = parent.get_internal_node_right_child();
+            child_max_key_index = parent.internal_node_find_child(child_max_key);
+            origin_num_keys = parent.get_internal_node_num_keys();
+            if origin_num_keys >= INTERNAL_NODE_MAX_CELLS {
+                println!("Need to implement splitting internal node");
+                process::exit(0x0010);
+            }
+            parent.increase_internal_node_num_keys(1);
+        }
+
+        let right_child_max_key;
+        {
+            let right_child = self.pager.get_page_view(right_child_page_num).unwrap();
+            right_child_max_key = right_child.get_node_max_key();
+        }
+
+        if child_max_key > right_child_max_key {
+            let parent = self.pager.get_page(parent_page_num);
+            // let parent_ptr = parent as *mut Page;
+            parent.set_internal_node_right_child(child_page_num);
+            parent.set_internal_node_child(origin_num_keys, right_child_page_num);
+            parent.set_internal_node_key(origin_num_keys, right_child_max_key);
+        } else {
+            let parent = self.pager.get_page(parent_page_num);
+            for i in (child_max_key_index + 1..=origin_num_keys).rev() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(parent.leaf_node_cell(i - 1),
+                                                  parent.leaf_node_cell(i) as *mut u8,
+                                                  INTERNAL_NODE_CELL_SIZE);
+                }
+            }
+            parent.set_internal_node_child(child_max_key_index, child_page_num);
+            parent.set_internal_node_key(child_max_key_index, child_max_key);
+        }
     }
 
     pub fn print_tree(&self) {
@@ -628,13 +707,18 @@ impl <'a> Cursor<'a> {
         let value_cell_num = self.cell_num;
         // page that will be created
         let new_page_num = self.table.pager.get_unused_page_num();
+        let old_max;
         {
             let old_node = self.get_page_view().unwrap();
+            old_max = old_node.get_node_max_key();
             let old_next_page_num = old_node.get_leaf_node_next_leaf();
+            let old_node_parent_num = old_node.get_node_parent();
             let old_node_ptr = old_node as *const Page;
+            // create a new node
             let new_node = self.table.pager.get_page(new_page_num);
             // init and copy cells to new right node from old node
             new_node.initialize_leaf_node();
+            new_node.set_node_parent(old_node_parent_num);
             new_node.set_leaf_node_next_leaf(old_next_page_num);
             copy_page_data((LEAF_NODE_LEFT_SPLIT_COUNT..LEAF_NODE_MAX_CELLS + 1).rev(), old_node_ptr, new_node, key, value, value_cell_num);
             new_node.set_leaf_node_num_cells(LEAF_NODE_RIGHT_SPLIT_COUNT);
@@ -655,10 +739,15 @@ impl <'a> Cursor<'a> {
         }
 
         if is_node_root {
+            // The old leaf node is the root node, then a new root node should be created.
             self.create_new_node(new_page_num);
         } else {
-            println!("Need to implement updating parent after split");
-            process::exit(0x0010);
+            let old_node = self.get_page();
+            let parent_page_num = old_node.get_node_parent();
+            let new_max = old_node.get_node_max_key();
+            let parent = self.table.pager.get_page(parent_page_num);
+            parent.update_internal_node_key(old_max, new_max);
+            self.table.internal_node_insert(parent_page_num, new_page_num);
         }
     }
 
@@ -684,6 +773,16 @@ impl <'a> Cursor<'a> {
         old_node.set_internal_node_child(0, left_child_page_num);
         old_node.set_internal_node_key(0, node_max_key);
         old_node.set_internal_node_right_child(right_child_page_num);
+
+        let root_page_num = self.table.root_page_num;
+        {
+            let left_child = self.table.pager.get_page(left_child_page_num);
+            left_child.set_node_parent(root_page_num);
+        }
+        {
+            let right_child = self.table.pager.get_page(right_child_page_num);
+            right_child.set_node_parent(root_page_num);
+        }
     }
 }
 
@@ -768,6 +867,9 @@ const INTERNAL_NODE_HEADER_SIZE: usize = COMMON_NODE_HEADER_SIZE + INTERNAL_NODE
 const INTERNAL_NODE_KEY_SIZE: usize = std::mem::size_of::<u32>();
 const INTERNAL_NODE_CHILD_SIZE: usize = std::mem::size_of::<usize>();
 const INTERNAL_NODE_CELL_SIZE: usize = INTERNAL_NODE_KEY_SIZE + INTERNAL_NODE_CHILD_SIZE;
+
+// TODO for test, to be replaced with actual internal node cell number
+const INTERNAL_NODE_MAX_CELLS: usize = 3;
 
 fn main() {
     fn print_prompt() {
@@ -879,7 +981,6 @@ fn main() {
                 if cell_num < page.leaf_node_num_cells() {
                     let key_at_index = page.leaf_node_key(cell_num);
                     if key_at_index == row_to_insert.id {
-                        // TODO
                         return EXECUTE_DUPLICATE_KEY
                     }
                 }
@@ -953,7 +1054,14 @@ fn main() {
         }
 
         match prepare_statement(&command) {
-            Ok(stmt) => execute_statement(stmt, &mut table),
+            Ok(stmt) => {
+                match execute_statement(stmt, &mut table) {
+                    EXECUTE_SUCCESS => println!("Executed."),
+                    EXECUTE_DUPLICATE_KEY => println!("Error: Duplicate key."),
+                    EXECUTE_TABLE_FULL => println!("Error: Table full."),
+                    _ => println!("Error: execute failed")
+                }
+            },
             Err(prepare_result) => {
                 match prepare_result {
                     PREPARE_UNRECOGNIZED_STATEMENT =>
@@ -970,6 +1078,5 @@ fn main() {
             }
 
         };
-        println!("Executed.");
     }
 }
